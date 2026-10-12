@@ -19,15 +19,20 @@ import io.milvus.param.collection.GetCollectionStatisticsParam;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * 代码向量检索服务（Milvus）。
+ */
 @Slf4j
 @Service
 public class CodeRetrievalService {
+
     @Autowired
     @Qualifier("milvusEmbeddingStore")
     private EmbeddingStore<TextSegment> embeddingStore;
@@ -41,27 +46,30 @@ public class CodeRetrievalService {
     @Autowired
     private HybridSearchService hybridSearchService;
 
-    private int dimension = 1024;
+    // Milvus 集合名
+    @Value("${agent.milvus.collection:bf_novel_code}")
+    private String collectionName = "bf_novel_code";
+
+    // 维度探测失败时的回退值
+    @Value("${agent.embedding.dimension:1024}")
+    private int fallbackDimension = 1024;
+
+    // Milvus 单次 topK 上限
+    @Value("${agent.milvus.max-top-k:16384}")
+    private int maxTopK = 16384;
+
+    // 运行时探测到的向量维度，-1 表示尚未探测
+    private volatile int dimension = -1;
 
     /**
-     * 根据需求检索相似代码
-     *
-     * @param query 查询文本（需求描述）
-     * @param maxResults 返回结果数量
-     * @return 检索结果列表
+     * 根据需求检索相似代码。
      */
     public List<RetrievedCode> search(String query, int maxResults) {
         return search(query, maxResults, null, null);
     }
 
     /**
-     * 根据需求检索相似代码，可按项目过滤
-     *
-     * @param query 查询文本
-     * @param maxResults 返回结果数量
-     * @param projectName 项目名称过滤（可选）
-     * @param minScore 最低相似度阈值（可选，0-1）
-     * @return 检索结果列表
+     * 根据需求检索相似代码，可按项目过滤。
      */
     public List<RetrievedCode> search(String query, int maxResults, String projectName, Double minScore) {
         log.info("检索: query={}, project={}, maxResults={}", query, projectName, maxResults);
@@ -93,7 +101,6 @@ public class CodeRetrievalService {
             // 执行检索（使用 search 方法，不是 findRelevant）
             EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
 
-            // 转换结果
             return searchResult.matches().stream()
                     .map(match -> {
                         Metadata metadata = match.embedded().metadata();
@@ -117,56 +124,39 @@ public class CodeRetrievalService {
     }
 
     /**
-     * 混合搜索入口
-     * @param query
-     * @param maxResults
-     * @return
+     * 混合搜索入口。
      */
     public List<RetrievedCode> hybridSearch(String query, int maxResults) {
         return hybridSearch(query, maxResults, null, 0.3);
     }
 
     public List<RetrievedCode> hybridSearch(String query, int maxResults, String projectName, Double minScore) {
-        // 调用 HybridSearchService
         return hybridSearchService.hybridSearch(query, maxResults, projectName, minScore);
     }
 
     /**
-     * 按类名精确检索
-     *
-     * @param className 类名
-     * @param projectName 项目名称（可选）
-     * @return 检索结果列表
+     * 按类名精确检索。
      */
     public List<RetrievedCode> findByClassName(String className, String projectName) {
         return search(className, 10, projectName, null);
     }
 
     /**
-     * 检索项目A的基础接口（供Agent参考代码规范）
-     *
-     * @return 基础接口代码列表
+     * 检索项目 A 的基础接口（供 Agent 参考代码规范）。
      */
     public List<RetrievedCode> getBaseProjectApis() {
-        // 检索项目A中的公开接口和抽象类
         return search("public interface abstract class base service", 20, "framework", null);
     }
 
     /**
-     * 检索项目A中指定类型的代码
-     *
-     * @param keyword 关键词（如 BaseEntity, BaseService）
-     * @return 相关代码列表
+     * 检索项目 A 中指定类型的代码。
      */
     public List<RetrievedCode> getBaseProjectCodeByKeyword(String keyword) {
         return search(keyword, 10, "framework", 0.7);
     }
 
     /**
-     * 格式化检索结果为 Prompt 上下文
-     *
-     * @param results 检索结果列表
-     * @return 格式化的字符串，可直接放入 Prompt
+     * 格式化检索结果为 Prompt 上下文。
      */
     public String formatAsPromptContext(List<RetrievedCode> results) {
         if (results == null || results.isEmpty()) {
@@ -179,7 +169,9 @@ public class CodeRetrievalService {
         for (int i = 0; i < results.size(); i++) {
             RetrievedCode code = results.get(i);
             String content = code.getContent();
-            // 限制代码长度，避免超出上下文窗口
+            if (content == null) {
+                content = "";
+            }
             if (content.length() > 2000) {
                 content = content.substring(0, 2000) + "\n... (代码过长已截断)";
             }
@@ -201,10 +193,7 @@ public class CodeRetrievalService {
     }
 
     /**
-     * 精简格式化（只保留代码，用于节省 token）
-     *
-     * @param results 检索结果列表
-     * @return 精简格式的字符串
+     * 精简格式化（只保留代码，用于节省 token）。
      */
     public String formatAsCompactContext(List<RetrievedCode> results) {
         if (results == null || results.isEmpty()) {
@@ -222,32 +211,41 @@ public class CodeRetrievalService {
     }
 
     /**
-     * 查询指定项目的所有代码片段（用于调试和验证）
+     * 查询指定项目的所有代码片段（用于构建关键词索引、调试和验证）。
      *
-     * @param projectName 项目名称（可选，为null则查询全部）
-     * @param limit 返回数量限制（建议设置，避免返回过多数据）
+     * @param projectName 项目名称（可选，为 null 则查询全部）
+     * @param limit       返回数量限制
      * @return 所有代码片段列表
      */
     public List<RetrievedCode> getAllSegments(String projectName, int limit) {
         log.info("查询全部片段: project={}, limit={}", projectName, limit);
 
         try {
-            // 构建过滤器
             Filter filter = null;
             if (projectName != null && !projectName.isEmpty()) {
                 filter = MetadataFilterBuilder.metadataKey("projectName").isEqualTo(projectName);
             }
 
-            // 使用一个通用查询向量（全部1.0或随机向量）
-            // 注意：Milvus 要求必须提供查询向量，所以用一个中性向量
-            float[] neutralVector = new float[dimension];  // 需要知道维度
-            Arrays.fill(neutralVector, 1.0f);  // 填充1.0，匹配所有向量
+            // Milvus 要求必须提供查询向量，这里使用中性向量做「全量拉取」的折中方案。
+            // 关键修复：维度改为运行时探测，避免与 embedding 模型不匹配导致静默失败。
+            int dim = resolveDimension();
+            if (dim <= 0) {
+                log.error("无法确定 embedding 维度，放弃全量查询");
+                return List.of();
+            }
+            float[] neutralVector = new float[dim];
+            Arrays.fill(neutralVector, 1.0f);
+
+            int effectiveLimit = Math.max(1, Math.min(limit, maxTopK));
+            if (effectiveLimit != limit) {
+                log.warn("limit {} 超出 Milvus 上限，已钳位为 {}", limit, effectiveLimit);
+            }
 
             Embedding queryEmbedding = Embedding.from(neutralVector);
 
             EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
                     .queryEmbedding(queryEmbedding)
-                    .maxResults(limit)
+                    .maxResults(effectiveLimit)
                     .filter(filter)
                     .build();
 
@@ -273,19 +271,44 @@ public class CodeRetrievalService {
     }
 
     /**
-     * 获取集合中的记录总数（需要注入 MilvusServiceClient）
+     * 运行时探测 embedding 维度（双重检查锁，只探测一次）。
+     */
+    private int resolveDimension() {
+        int cached = dimension;
+        if (cached > 0) {
+            return cached;
+        }
+        synchronized (this) {
+            if (dimension > 0) {
+                return dimension;
+            }
+            try {
+                int probed = embeddingModel.embed("dimension-probe").content().vector().length;
+                if (probed > 0) {
+                    dimension = probed;
+                    log.info("探测到 embedding 维度: {}", probed);
+                    return probed;
+                }
+            } catch (Exception e) {
+                log.warn("embedding 维度探测失败，回退到配置值 {}", fallbackDimension, e);
+            }
+            dimension = fallbackDimension;
+            return dimension;
+        }
+    }
+
+    /**
+     * 获取集合中的记录总数。
      */
     public long getCollectionCount() {
         try {
-            // 使用 MilvusServiceClient 获取统计信息
             FlushParam flushParam = FlushParam.newBuilder()
-                    .addCollectionName("bf_novel_code")
+                    .addCollectionName(collectionName)
                     .build();
             milvusClient.flush(flushParam);
 
-            // 获取集合统计
             GetCollectionStatisticsParam param = GetCollectionStatisticsParam.newBuilder()
-                    .withCollectionName("bf_novel_code")
+                    .withCollectionName(collectionName)
                     .build();
             R<GetCollectionStatisticsResponse> response = milvusClient.getCollectionStatistics(param);
 
@@ -299,7 +322,7 @@ public class CodeRetrievalService {
     }
 
     /**
-     * 按文件路径查询（用于验证特定文件是否入库）
+     * 按文件路径查询（用于验证特定文件是否入库）。
      */
     public List<RetrievedCode> findByFilePath(String filePath, String projectName) {
         log.info("按文件路径查询: filePath={}, project={}", filePath, projectName);
@@ -341,16 +364,14 @@ public class CodeRetrievalService {
     }
 
     /**
-     * 精确查找类定义（通过类名 + segmentType 过滤）
+     * 精确查找类定义（通过类名 + segmentType 过滤）。
      */
     public List<RetrievedCode> findByClassSegment(String className) {
         log.info("精确查找类定义: className={}", className);
 
         try {
-            // 使用类名作为查询向量，同时用 metadata 过滤
             var queryEmbedding = embeddingModel.embed(className).content();
 
-            // 构建过滤器：className 精确匹配 + segmentType 是 class/interface/enum
             Filter filter = MetadataFilterBuilder.metadataKey("className").isEqualTo(className)
                     .and(MetadataFilterBuilder.metadataKey("segmentType").isIn("class", "interface", "enum"));
 

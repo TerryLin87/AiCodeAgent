@@ -2,7 +2,7 @@ package com.example.aiagentdemo.service;
 
 import com.example.aiagentdemo.data.AgentSession;
 import dev.langchain4j.data.message.ChatMessage;
-import dev.langchain4j.data.message.SystemMessage;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -14,7 +14,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 会话管理器
+ * 会话管理器。
  * 职责：
  * 1. 创建、获取、更新、删除会话
  * 2. 自动清理过期会话
@@ -31,11 +31,12 @@ public class SessionManager {
     private final Map<String, AgentSession> sessions = new ConcurrentHashMap<>();
 
     /**
-     * 系统提示词（所有会话共用）
+     * 系统提示词（所有会话共用，不作为消息写入会话，见类注释）
      */
+    @Getter
     private String systemPrompt = """
             你是一个智能的 Java 代码助手，具有调用工具和委托子 Agent 的能力。
-            
+
             请根据用户需求，合理使用工具完成任务。
             如果任务复杂，可以分解为多个步骤逐步完成。
             如果信息不足，先通过工具获取信息再回答。
@@ -77,7 +78,6 @@ public class SessionManager {
     private AgentSession createSession(String sessionId, String userId) {
         AgentSession session = AgentSession.createNew(sessionId);
         session.setUserId(userId);
-//        session.addMessage(SystemMessage.from(systemPrompt));
         sessions.put(sessionId, session);
         log.info("创建会话: sessionId={}, userId={}", sessionId, userId);
         return session;
@@ -209,6 +209,7 @@ public class SessionManager {
     //endregion
 
     //region 后台清理
+
     /**
      * 定时清理过期会话（每 5 分钟执行一次）
      */
@@ -224,6 +225,7 @@ public class SessionManager {
             log.info("🧹 清理过期会话: {} 个", expiredIds.size());
         }
     }
+
     //endregion
 
     //region 辅助方法
@@ -233,7 +235,7 @@ public class SessionManager {
     }
 
     /**
-     * 设置系统提示词
+     * 设置系统提示词（仅供非 AiServices 调用链使用）
      */
     public void setSystemPrompt(String prompt) {
         this.systemPrompt = prompt;

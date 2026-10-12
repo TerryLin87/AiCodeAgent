@@ -51,7 +51,7 @@ public class LongTermMemoryService {
             // 3. 生成向量
             Embedding embedding = embeddingModel.embed(content).content();
 
-            // 4. ✅ 正确调用：add(Embedding, TextSegment) → 自动生成ID，存储向量+文本
+            // 4. 正确调用：add(Embedding, TextSegment) → 自动生成ID，存储向量+文本
             String id = embeddingStore.add(embedding, segment);
             log.debug("已存储长期记忆: id={}, session={}, role={}", id, sessionId, role);
 

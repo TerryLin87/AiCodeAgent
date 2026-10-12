@@ -2,12 +2,19 @@ package com.example.aiagentdemo.service;
 
 import com.example.aiagentdemo.data.EvaluationResult;
 import com.example.aiagentdemo.model.DeepSeekModel;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 自我评估服务。
+ */
 @Slf4j
 @Service
 public class SelfEvaluationService {
@@ -20,10 +27,12 @@ public class SelfEvaluationService {
 
     // 评估阈值
     private static final double PASS_THRESHOLD = 7.0;
-    private static final int MAX_FIX_ATTEMPTS = 3;
+
+    // 降级时的保守分值
+    private static final double FALLBACK_SCORE = 5.0;
 
     /**
-     * 自我评估：评估代码/回答的质量
+     * 自我评估：评估代码/回答的质量。
      */
     public EvaluationResult evaluate(String content, String context) {
         log.info("开始自我评估");
@@ -33,22 +42,15 @@ public class SelfEvaluationService {
         try {
             String response = deepSeekModel.chat(prompt);
             log.debug("评估响应: {}", response);
-
             return parseEvaluation(response);
-
         } catch (Exception e) {
             log.error("评估失败", e);
-            // 返回默认评估（保守）
-            EvaluationResult result = EvaluationResult.createDefault();
-            result.setOverallScore(6.0);
-            result.setPassed(false);
-            result.getWeaknesses().add("评估服务异常，无法完成质量检查");
-            return result;
+            return fallbackResult("评估服务异常或返回内容无法解析：" + e.getMessage());
         }
     }
 
     /**
-     * 构建评估 Prompt
+     * 构建评估 Prompt。
      */
     private String buildEvaluationPrompt(String content, String context) {
         return String.format("""
@@ -83,101 +85,189 @@ public class SelfEvaluationService {
                 "weaknesses": ["缺点1", "缺点2"],
                 "suggestions": ["建议1", "建议2"]
             }
+
+            要求：只输出 JSON 本身，不要输出任何解释文字或 Markdown 代码块标记。
             """, context, content);
     }
 
     /**
-     * 解析评估结果
+     * 解析评估结果。
      */
-    private EvaluationResult parseEvaluation(String json) throws Exception {
-        // 清理 JSON
-        String cleanJson = json;
-        if (cleanJson.contains("```json")) {
-            cleanJson = cleanJson.replaceAll("```json\\s*", "").replaceAll("\\s*```", "");
-        }
-        if (cleanJson.contains("```")) {
-            cleanJson = cleanJson.replaceAll("```\\s*", "");
+    private EvaluationResult parseEvaluation(String raw) throws Exception {
+        String json = extractJsonObject(raw);
+        if (json == null) {
+            throw new IllegalArgumentException("响应中未找到 JSON 对象");
         }
 
-        var jsonNode = objectMapper.readTree(cleanJson);
+        JsonNode jsonNode = objectMapper.readTree(json);
 
         EvaluationResult result = EvaluationResult.builder()
-                .correctness(jsonNode.has("correctness") ? jsonNode.get("correctness").asDouble() : 5.0)
-                .completeness(jsonNode.has("completeness") ? jsonNode.get("completeness").asDouble() : 5.0)
-                .clarity(jsonNode.has("clarity") ? jsonNode.get("clarity").asDouble() : 5.0)
-                .normativity(jsonNode.has("normativity") ? jsonNode.get("normativity").asDouble() : 5.0)
-                .usability(jsonNode.has("usability") ? jsonNode.get("usability").asDouble() : 5.0)
-                .strengths(new java.util.ArrayList<>())
-                .weaknesses(new java.util.ArrayList<>())
-                .suggestions(new java.util.ArrayList<>())
+                .correctness(safeScore(jsonNode, "correctness", FALLBACK_SCORE))
+                .completeness(safeScore(jsonNode, "completeness", FALLBACK_SCORE))
+                .clarity(safeScore(jsonNode, "clarity", FALLBACK_SCORE))
+                .normativity(safeScore(jsonNode, "normativity", FALLBACK_SCORE))
+                .usability(safeScore(jsonNode, "usability", FALLBACK_SCORE))
+                .strengths(new ArrayList<>())
+                .weaknesses(new ArrayList<>())
+                .suggestions(new ArrayList<>())
                 .build();
 
-        // 提取优点
-        if (jsonNode.has("strengths")) {
-            jsonNode.get("strengths").forEach(s -> result.getStrengths().add(s.asText()));
-        }
+        result.getStrengths().addAll(safeList(jsonNode, "strengths"));
+        result.getWeaknesses().addAll(safeList(jsonNode, "weaknesses"));
+        result.getSuggestions().addAll(safeList(jsonNode, "suggestions"));
 
-        // 提取缺点
-        if (jsonNode.has("weaknesses")) {
-            jsonNode.get("weaknesses").forEach(s -> result.getWeaknesses().add(s.asText()));
-        }
-
-        // 提取建议
-        if (jsonNode.has("suggestions")) {
-            jsonNode.get("suggestions").forEach(s -> result.getSuggestions().add(s.asText()));
-        }
-
-        // 计算总分和通过状态
         result.calculateOverall();
+
+        // 兜底：LLM 没给总分时，用各维度均值，避免总分恒为 0 被判不通过
+        if (result.getOverallScore() <= 0) {
+            double avg = (result.getCorrectness() + result.getCompleteness() + result.getClarity()
+                    + result.getNormativity() + result.getUsability()) / 5.0;
+            result.setOverallScore(avg);
+            result.setPassed(avg >= PASS_THRESHOLD);
+        }
 
         return result;
     }
 
     /**
-     * 判断是否通过评估
+     * 从任意文本中抠出最外层的 JSON 对象。
+     * 兼容 ```json 围栏、前后夹带的自然语言说明。
+     */
+    private String extractJsonObject(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String text = raw.trim();
+        // 去掉代码块围栏
+        if (text.contains("```")) {
+            text = text.replaceAll("```(?:json|JSON)?", "").trim();
+        }
+        int start = text.indexOf('{');
+        int end = text.lastIndexOf('}');
+        if (start < 0 || end <= start) {
+            return null;
+        }
+        return text.substring(start, end + 1);
+    }
+
+    /**
+     * 宽容解析分值：兼容数字、字符串数字、带单位文本（"8.5分"），并钳位到 0~10。
+     */
+    private double safeScore(JsonNode node, String field, double defaultValue) {
+        if (node == null) {
+            return defaultValue;
+        }
+        JsonNode valueNode = node.get(field);
+        if (valueNode == null || valueNode.isNull()) {
+            return defaultValue;
+        }
+
+        double value;
+        if (valueNode.isNumber()) {
+            value = valueNode.asDouble();
+        } else {
+            String text = valueNode.asText("").replaceAll("[^0-9.\\-]", "");
+            if (text.isEmpty()) {
+                return defaultValue;
+            }
+            try {
+                value = Double.parseDouble(text);
+            } catch (NumberFormatException e) {
+                return defaultValue;
+            }
+        }
+        if (Double.isNaN(value)) {
+            return defaultValue;
+        }
+        return Math.max(0.0, Math.min(10.0, value));
+    }
+
+    /**
+     * 宽容解析字符串数组：兼容 JSON 数组与单个字符串。
+     */
+    private List<String> safeList(JsonNode node, String field) {
+        List<String> results = new ArrayList<>();
+        if (node == null) {
+            return results;
+        }
+        JsonNode valueNode = node.get(field);
+        if (valueNode == null || valueNode.isNull()) {
+            return results;
+        }
+        if (valueNode.isArray()) {
+            valueNode.forEach(item -> {
+                String text = item.asText("").trim();
+                if (!text.isEmpty()) {
+                    results.add(text);
+                }
+            });
+        } else if (valueNode.isTextual()) {
+            String text = valueNode.asText("").trim();
+            if (!text.isEmpty()) {
+                results.add(text);
+            }
+        }
+        return results;
+    }
+
+    /**
+     * 降级结果：保守判为未通过。
+     */
+    private EvaluationResult fallbackResult(String reason) {
+        EvaluationResult result = EvaluationResult.createDefault();
+        result.setOverallScore(FALLBACK_SCORE);
+        result.setPassed(false);
+        if (result.getWeaknesses() != null) {
+            result.getWeaknesses().add(reason);
+        }
+        return result;
+    }
+
+    /**
+     * 判断是否通过评估。
      */
     public boolean isPassed(EvaluationResult result) {
         return result.isPassed();
     }
 
     /**
-     * 生成评估报告（可读格式）
+     * 生成评估报告（可读格式）。
      */
     public String formatReport(EvaluationResult result) {
         StringBuilder sb = new StringBuilder();
-        sb.append("📊 质量评估报告\n");
+        sb.append("质量评估报告\n");
         sb.append("=".repeat(50)).append("\n\n");
 
-        sb.append("📈 各维度评分:\n");
-        sb.append("  ├─ 正确性: ").append(result.getCorrectness()).append("/10\n");
-        sb.append("  ├─ 完整性: ").append(result.getCompleteness()).append("/10\n");
-        sb.append("  ├─ 清晰度: ").append(result.getClarity()).append("/10\n");
-        sb.append("  ├─ 规范性: ").append(result.getNormativity()).append("/10\n");
-        sb.append("  └─ 可用性: ").append(result.getUsability()).append("/10\n\n");
+        sb.append("各维度评分:\n");
+        sb.append("  正确性: ").append(result.getCorrectness()).append("/10\n");
+        sb.append("  完整性: ").append(result.getCompleteness()).append("/10\n");
+        sb.append("  清晰度: ").append(result.getClarity()).append("/10\n");
+        sb.append("  规范性: ").append(result.getNormativity()).append("/10\n");
+        sb.append("  可用性: ").append(result.getUsability()).append("/10\n\n");
 
-        sb.append("📊 总分: ").append(String.format("%.1f", result.getOverallScore())).append("/10\n");
-        sb.append("📌 状态: ").append(result.isPassed() ? "✅ 通过" : "❌ 未通过").append("\n\n");
+        sb.append("总分: ").append(String.format("%.1f", result.getOverallScore())).append("/10\n");
+        sb.append("状态: ").append(result.isPassed() ? "通过" : "未通过").append("\n\n");
 
         if (!result.getStrengths().isEmpty()) {
-            sb.append("✅ 优点:\n");
+            sb.append("优点:\n");
             for (String s : result.getStrengths()) {
-                sb.append("  ├─ ").append(s).append("\n");
+                sb.append(" ── ").append(s).append("\n");
             }
             sb.append("\n");
         }
 
         if (!result.getWeaknesses().isEmpty()) {
-            sb.append("⚠️ 缺点:\n");
+            sb.append("缺点:\n");
             for (String s : result.getWeaknesses()) {
-                sb.append("  ├─ ").append(s).append("\n");
+                sb.append("  ── ").append(s).append("\n");
             }
             sb.append("\n");
         }
 
         if (!result.getSuggestions().isEmpty()) {
-            sb.append("💡 改进建议:\n");
+            sb.append("改进建议:\n");
             for (String s : result.getSuggestions()) {
-                sb.append("  ├─ ").append(s).append("\n");
+                sb.append("  ── ").append(s).append("\n");
             }
         }
 

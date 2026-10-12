@@ -12,9 +12,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import tools.jackson.databind.ObjectMapper;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -36,53 +39,46 @@ import java.util.stream.Collectors;
 @Slf4j
 @Component
 public class ContextCompressor {
+
     @Autowired
     @Qualifier("DeepSeekModel")
     private DeepSeekModel deepSeekModel;
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
     // ==================== 可配置参数 ====================
-    /**
-     * 触发压缩的最大消息数
-     */
+
+    // 触发压缩的最大消息数
     @Getter
     @Setter
     @Value("${agent.context.max-messages:20}")
     private int maxMessages = 20;
 
-    /**
-     * 触发压缩的最大 Token 数（估算）
-     */
+    // 触发压缩的最大 Token 数（估算）
     @Getter
     @Setter
     @Value("${agent.context.max-tokens:8000}")
     private int maxTokens = 8000;
 
-    /**
-     * 压缩后保留的最近消息数
-     */
+    // 压缩后保留的最近消息数
     @Getter
     @Setter
     @Value("${agent.context.keep-recent:5}")
     private int keepRecent = 5;
 
-    /**
-     * 是否启用 LLM 摘要压缩
-     */
+    // 是否启用 LLM 摘要压缩
     @Setter
     @Value("${agent.context.enable-summary:true}")
     private boolean enableSummary = true;
 
-    /**
-     * 每条消息的平均 Token 数（估算用）
-     */
-    private static final int AVG_TOKENS_PER_CHAR = 3;
+    // 短消息阈值（字符数），低于该长度的相邻同角色消息会被合并
+    private static final int SHORT_THRESHOLD = 100;
+
+    // 单条消息截断上限（字符数）
+    private static final int MAX_MESSAGE_CHARS = 2000;
 
     //region 核心方法
 
     /**
-     * 检查是否需要压缩
+     * 检查是否需要压缩。
      */
     public boolean needsCompression(List<ChatMessage> messages) {
         if (messages == null || messages.isEmpty()) {
@@ -98,15 +94,14 @@ public class ContextCompressor {
         // 条件2：估算 Token 数超过阈值
         int estimatedTokens = estimateTokens(messages);
         if (estimatedTokens > maxTokens) {
-            log.info("📊 估算 Token {} > {}, 需要压缩", estimatedTokens, maxTokens);
+            log.info("估算 Token {} > {}, 需要压缩", estimatedTokens, maxTokens);
             return true;
         }
-
         return false;
     }
 
     /**
-     * 压缩对话历史
+     * 压缩对话历史。
      *
      * @param messages 原始消息列表
      * @return 压缩后的消息列表
@@ -115,12 +110,11 @@ public class ContextCompressor {
         if (messages == null || messages.isEmpty()) {
             return messages;
         }
-
         if (!needsCompression(messages)) {
             return messages;
         }
 
-        log.info("🔄 开始上下文压缩，原始消息数: {}", messages.size());
+        log.info("开始上下文压缩，原始消息数: {}", messages.size());
         long startTime = System.currentTimeMillis();
 
         try {
@@ -132,16 +126,15 @@ public class ContextCompressor {
 
             // 如果已经满足条件，提前返回
             if (!needsCompression(result)) {
-                log.info("✅ 压缩完成 (Level 1)，耗时: {}ms", System.currentTimeMillis() - startTime);
+                log.info("压缩完成 (Level 1)，耗时: {}ms", System.currentTimeMillis() - startTime);
                 return result;
             }
 
-            // ===== Level 2: 合并连续的短消息 =====
+            // ===== Level 2: 合并连续的短消息（保持角色） =====
             result = level2MergeShortMessages(result);
             log.debug("Level 2 压缩后消息数: {}", result.size());
-
             if (!needsCompression(result)) {
-                log.info("✅ 压缩完成 (Level 2)，耗时: {}ms", System.currentTimeMillis() - startTime);
+                log.info("压缩完成 (Level 2)，耗时: {}ms", System.currentTimeMillis() - startTime);
                 return result;
             }
 
@@ -149,9 +142,8 @@ public class ContextCompressor {
             if (enableSummary && result.size() > keepRecent * 2) {
                 result = level3Summarize(result);
                 log.debug("Level 3 压缩后消息数: {}", result.size());
-
                 if (!needsCompression(result)) {
-                    log.info("✅ 压缩完成 (Level 3)，耗时: {}ms", System.currentTimeMillis() - startTime);
+                    log.info("压缩完成 (Level 3)，耗时: {}ms", System.currentTimeMillis() - startTime);
                     return result;
                 }
             }
@@ -159,75 +151,56 @@ public class ContextCompressor {
             // ===== Level 4: 提取关键实体和事实 =====
             result = level4ExtractKeyInfo(result);
             log.debug("Level 4 压缩后消息数: {}", result.size());
-
             if (!needsCompression(result)) {
-                log.info("✅ 压缩完成 (Level 4)，耗时: {}ms", System.currentTimeMillis() - startTime);
+                log.info("压缩完成 (Level 4)，耗时: {}ms", System.currentTimeMillis() - startTime);
                 return result;
             }
 
             // ===== Level 5: 截断到最大长度 =====
             result = level5Truncate(result);
-            log.info("✅ 压缩完成 (Level 5)，最终消息数: {}, 耗时: {}ms",
+            log.info("压缩完成 (Level 5)，最终消息数: {}, 耗时: {}ms",
                     result.size(), System.currentTimeMillis() - startTime);
-
             return result;
 
         } catch (Exception e) {
-            log.error("❌ 上下文压缩失败", e);
-            // 降级：只保留系统提示和最近 N 条消息
+            log.error("上下文压缩失败，降级处理", e);
             return fallbackCompress(messages);
         }
     }
 
     /**
-     * 压缩对话历史，返回摘要文本（用于替换原有消息）
-     *
-     * @param messages 原始消息列表
-     * @return 压缩后的摘要文本
+     * 压缩对话历史，返回摘要文本（用于替换原有消息）。
      */
     public String compressToSummary(List<ChatMessage> messages) {
         if (messages == null || messages.isEmpty()) {
             return "";
         }
-
         if (!needsCompression(messages)) {
             return formatMessagesAsText(messages);
         }
 
         log.info("生成对话摘要，原始消息数: {}", messages.size());
-
         try {
-            // 提取需要摘要的部分（跳过系统提示，保留最近 keepRecent 条）
+            int systemIdx = indexOfSystemMessage(messages);
             List<ChatMessage> toSummarize = new ArrayList<>();
             List<ChatMessage> recent = new ArrayList<>();
 
-            int idx = 0;
-            // 跳过系统提示
-            if (!messages.isEmpty() && messages.get(0) instanceof SystemMessage) {
-                idx = 1;
-            }
-
-            int endIdx = Math.max(idx, messages.size() - keepRecent);
-            for (int i = idx; i < endIdx; i++) {
-                toSummarize.add(messages.get(i));
+            int endIdx = Math.max(0, messages.size() - keepRecent);
+            for (int i = 0; i < endIdx; i++) {
+                if (i != systemIdx) {
+                    toSummarize.add(messages.get(i));
+                }
             }
             for (int i = endIdx; i < messages.size(); i++) {
-                recent.add(messages.get(i));
+                if (i != systemIdx) {
+                    recent.add(messages.get(i));
+                }
             }
 
-            // 生成摘要
             String summary = generateSummary(toSummarize);
-
-            // 格式化最近消息
             String recentText = formatMessagesAsText(recent);
 
-            // 组合最终结果
-
-            return "【对话摘要】\n" +
-                    summary +
-                    "\n\n【最近对话】\n" +
-                    recentText;
-
+            return "【对话摘要】\n" + summary + "\n\n【最近对话】\n" + recentText;
         } catch (Exception e) {
             log.error("生成摘要失败", e);
             return formatMessagesAsText(messages);
@@ -235,21 +208,19 @@ public class ContextCompressor {
     }
 
     /**
-     * 将消息列表格式化为文本（用于降级场景）
+     * 将消息列表格式化为文本（用于降级场景）。
      */
     private String formatMessagesAsText(List<ChatMessage> messages) {
         if (messages == null || messages.isEmpty()) {
             return "";
         }
-
         StringBuilder sb = new StringBuilder();
         for (ChatMessage msg : messages) {
-            // 跳过系统消息
             if (msg instanceof SystemMessage) {
                 continue;
             }
-            String role = msg instanceof UserMessage ? "用户" :
-                    msg instanceof AiMessage ? "助手" : "系统";
+            String role = msg instanceof UserMessage ? "用户"
+                    : msg instanceof AiMessage ? "助手" : "系统";
             String content = getMessageContent(msg);
             if (content != null && !content.isEmpty()) {
                 sb.append("[").append(role).append("] ").append(content).append("\n");
@@ -263,8 +234,8 @@ public class ContextCompressor {
     //region 五级压缩策略
 
     /**
-     * Level 1: 丢弃最旧的非关键消息
-     * 保留：系统提示 + 最近 N 条消息 + 用户的关键问题
+     * Level 1: 丢弃最旧的非关键消息。
+     * 保留：系统提示（仅第一条）+ 最近 keepRecent 条。
      */
     private List<ChatMessage> level1PruneOldMessages(List<ChatMessage> messages) {
         if (messages.size() <= maxMessages) {
@@ -273,28 +244,26 @@ public class ContextCompressor {
 
         List<ChatMessage> result = new ArrayList<>();
 
-        // 1. 保留系统提示
-        for (ChatMessage msg : messages) {
-            if (msg instanceof SystemMessage) {
-                result.add(msg);
-                break;
-            }
+        // 1. 保留系统提示（只保留第一条）
+        int systemIdx = indexOfSystemMessage(messages);
+        if (systemIdx >= 0) {
+            result.add(messages.get(systemIdx));
         }
 
-        // 2. 保留最近 keepRecent 条消息
+        // 2. 保留最近 keepRecent 条消息（跳过系统消息，避免重复）
         int start = Math.max(0, messages.size() - keepRecent);
         for (int i = start; i < messages.size(); i++) {
             ChatMessage msg = messages.get(i);
-            // 避免重复添加系统消息   
-            if (!(msg instanceof SystemMessage) || result.contains(msg)) {
-                result.add(msg);
+            if (msg instanceof SystemMessage) {
+                continue;
             }
+            result.add(msg);
         }
 
-        // 3. 如果结果太少，补充一些中间的重要消息
+        // 3. 结果太少时，从历史中补充用户消息（用户意图优先级高于助手输出）
         if (result.size() < keepRecent + 1 && messages.size() > keepRecent + 1) {
-            // 从中间补充一些用户消息
-            for (int i = 1; i < messages.size() - keepRecent && result.size() < maxMessages; i++) {
+            int from = systemIdx == 0 ? 1 : 0;
+            for (int i = from; i < messages.size() - keepRecent && result.size() < maxMessages; i++) {
                 ChatMessage msg = messages.get(i);
                 if (msg instanceof UserMessage && !result.contains(msg)) {
                     result.add(msg);
@@ -306,8 +275,9 @@ public class ContextCompressor {
     }
 
     /**
-     * Level 2: 合并连续的短消息
-     * 将相邻的短消息（长度 < 100 字符）合并为一条
+     * Level 2: 合并连续的短消息。
+     * <p>关键修复：只合并**相邻且同角色**的短消息，系统消息一律不参与合并，
+     * 从而不会再出现"AiMessage 被改写成 UserMessage"的角色污染。
      */
     private List<ChatMessage> level2MergeShortMessages(List<ChatMessage> messages) {
         if (messages.size() <= 1) {
@@ -316,178 +286,164 @@ public class ContextCompressor {
 
         List<ChatMessage> result = new ArrayList<>();
         List<ChatMessage> buffer = new ArrayList<>();
-        int bufferLength = 0;
-        int SHORT_THRESHOLD = 100;
 
         for (ChatMessage msg : messages) {
             String content = getMessageContent(msg);
-            boolean isShort = content != null && content.length() < SHORT_THRESHOLD;
+            boolean mergeable = !(msg instanceof SystemMessage)
+                    && content != null
+                    && content.length() < SHORT_THRESHOLD;
 
-            if (isShort) {
+            if (mergeable && (buffer.isEmpty() || sameRole(buffer.get(0), msg))) {
                 buffer.add(msg);
-                bufferLength += content.length();
+                continue;
+            }
+
+            flushBuffer(buffer, result);
+            if (mergeable) {
+                buffer.add(msg);
             } else {
-                // 遇到长消息，先处理缓冲区
-                if (!buffer.isEmpty()) {
-                    result.add(mergeBuffer(buffer));
-                    buffer.clear();
-                    bufferLength = 0;
-                }
                 result.add(msg);
             }
         }
-
-        // 处理剩余的缓冲区
-        if (!buffer.isEmpty()) {
-            result.add(mergeBuffer(buffer));
-        }
+        flushBuffer(buffer, result);
 
         return result;
     }
 
+    private void flushBuffer(List<ChatMessage> buffer, List<ChatMessage> out) {
+        if (buffer.isEmpty()) {
+            return;
+        }
+        out.add(mergeBuffer(buffer));
+        buffer.clear();
+    }
+
+    private boolean sameRole(ChatMessage a, ChatMessage b) {
+        return (a instanceof UserMessage && b instanceof UserMessage)
+                || (a instanceof AiMessage && b instanceof AiMessage);
+    }
+
     /**
-     * Level 3: LLM 摘要压缩
-     * 将中间部分对话压缩为摘要
+     * Level 3: LLM 摘要压缩。
+     * <p>修复：原实现只在 {@code messages.get(0)} 是 SystemMessage 时才提取系统提示，
+     * 否则会生成一条内容为空前缀的 SystemMessage。这里改为全表扫描定位系统消息。
      */
     private List<ChatMessage> level3Summarize(List<ChatMessage> messages) {
         if (messages.size() <= keepRecent + 1) {
             return messages;
         }
 
-        // 提取需要摘要的部分（跳过系统提示，保留最近 keepRecent 条）
-        String systemPrompt = "";
+        int systemIdx = indexOfSystemMessage(messages);
+        String systemPrompt = systemIdx >= 0 ? getMessageContent(messages.get(systemIdx)) : "";
+
         List<ChatMessage> toSummarize = new ArrayList<>();
         List<ChatMessage> recent = new ArrayList<>();
 
-        int idx = 0;
-        // 提取系统提示
-        if (!messages.isEmpty() && messages.get(0) instanceof SystemMessage) {
-            systemPrompt = getMessageContent(messages.get(0));
-            idx = 1;
-        }
-
-        // 计算需要摘要的范围
-        int endIdx = Math.max(idx, messages.size() - keepRecent);
-        for (int i = idx; i < endIdx; i++) {
-            toSummarize.add(messages.get(i));
+        int endIdx = Math.max(0, messages.size() - keepRecent);
+        for (int i = 0; i < endIdx; i++) {
+            if (i != systemIdx) {
+                toSummarize.add(messages.get(i));
+            }
         }
         for (int i = endIdx; i < messages.size(); i++) {
-            recent.add(messages.get(i));
+            if (i != systemIdx) {
+                recent.add(messages.get(i));
+            }
         }
 
-        // 如果摘要部分为空或太少，直接返回
         if (toSummarize.size() <= 2) {
             return messages;
         }
 
-        log.info("📝 生成摘要，消息数: {}", toSummarize.size());
-
-        // 调用 LLM 生成摘要
+        log.info("生成摘要，消息数: {}", toSummarize.size());
         String summary = generateSummary(toSummarize);
         log.debug("摘要长度: {} 字符", summary.length());
 
-        // 构建压缩后的消息列表
         List<ChatMessage> result = new ArrayList<>();
-
-        // 1. 系统消息（包含原有系统提示和摘要）
-        String combinedSystem = systemPrompt + "\n\n【对话摘要】\n" + summary;
-        result.add(SystemMessage.from(combinedSystem));
-
-        // 2. 最近的消息
+        String combinedSystem = (systemPrompt == null ? "" : systemPrompt)
+                + "\n\n【对话摘要】\n" + summary;
+        result.add(SystemMessage.from(combinedSystem.trim()));
         result.addAll(recent);
-
         return result;
     }
 
     /**
-     * Level 4: 提取关键实体和事实
-     * 从对话中提取关键信息（类名、方法名、项目名等）
+     * Level 4: 提取关键实体和事实。
+     * <p>注意：这一级只做"信息固化"，本身不减消息数；若调用方仍未满足阈值，
+     * 会继续走 Level 5。
      */
     private List<ChatMessage> level4ExtractKeyInfo(List<ChatMessage> messages) {
-        // 这是一个简化的实现
-        // 实际可以使用实体识别 NLP 或正则提取
-        // 当前实现：从消息中提取看起来像类名/方法名的内容
+        if (messages.isEmpty()) {
+            return messages;
+        }
 
-        List<ChatMessage> result = new ArrayList<>();
+        List<ChatMessage> result = new ArrayList<>(messages);
         Set<String> extractedEntities = new HashSet<>();
 
         for (ChatMessage msg : messages) {
             String content = getMessageContent(msg);
             if (content == null) {
-                result.add(msg);
                 continue;
             }
-
-            // 提取类名（简单正则）
-            List<String> classNames = extractClassNames(content);
-            extractedEntities.addAll(classNames);
-
-            // 提取方法名
-            List<String> methodNames = extractMethodNames(content);
-            extractedEntities.addAll(methodNames);
-
-            result.add(msg);
+            extractedEntities.addAll(extractClassNames(content));
+            extractedEntities.addAll(extractMethodNames(content));
         }
 
-        // 在第一条消息前添加提取的实体摘要
         if (!extractedEntities.isEmpty()) {
             String entitySummary = "【关键实体】" + String.join(", ", extractedEntities);
-            // 插入到第一条消息之后（如果有系统消息则作为系统消息的一部分）
             if (result.get(0) instanceof SystemMessage) {
                 String oldContent = getMessageContent(result.get(0));
-                String newContent = oldContent + "\n\n" + entitySummary;
-                result.set(0, SystemMessage.from(newContent));
+                result.set(0, SystemMessage.from(
+                        (oldContent == null ? "" : oldContent) + "\n\n" + entitySummary));
             } else {
-                // 在开头添加一条实体消息
                 result.add(0, SystemMessage.from(entitySummary));
             }
         }
-
         return result;
     }
 
     /**
-     * Level 5: 截断到最大长度
+     * Level 5: 截断到最大长度（最终保底）。
+     * <p>修复：原条件 {@code !(msg instanceof SystemMessage) || !result.contains(msg)}
+     * 在"结果里还没有系统消息"时会把最近窗口内的系统消息再次加入，造成重复；
+     * 这里改为系统消息由第 1 步统一保留，最近窗口内跳过。
      */
     private List<ChatMessage> level5Truncate(List<ChatMessage> messages) {
         List<ChatMessage> result = new ArrayList<>();
 
-        // 保留系统提示
-        String systemContent = "";
-        for (ChatMessage msg : messages) {
-            if (msg instanceof SystemMessage) {
-                systemContent = getMessageContent(msg);
-                break;
-            }
+        int systemIdx = indexOfSystemMessage(messages);
+        if (systemIdx >= 0) {
+            result.add(messages.get(systemIdx));
         }
 
-        // 保留最近 keepRecent 条消息
         int start = Math.max(0, messages.size() - keepRecent);
         for (int i = start; i < messages.size(); i++) {
             ChatMessage msg = messages.get(i);
-            if (!(msg instanceof SystemMessage) || !result.contains(msg)) {
-                result.add(msg);
+            if (msg instanceof SystemMessage) {
+                continue;
             }
+            result.add(msg);
         }
 
-        // 如果结果还是太长，截断每条消息的内容
-        List<ChatMessage> truncated = new ArrayList<>();
+        // 逐条截断超长内容，并保持原角色
+        List<ChatMessage> truncated = new ArrayList<>(result.size());
         for (ChatMessage msg : result) {
             String content = getMessageContent(msg);
-            if (content != null && content.length() > 2000) {
-                content = content.substring(0, 2000) + "\n... (内容已截断)";
+            if (content != null && content.length() > MAX_MESSAGE_CHARS) {
+                String cut = content.substring(0, MAX_MESSAGE_CHARS) + "\n... (内容已截断)";
                 if (msg instanceof SystemMessage) {
-                    truncated.add(SystemMessage.from(content));
+                    truncated.add(SystemMessage.from(cut));
                 } else if (msg instanceof UserMessage) {
-                    truncated.add(UserMessage.from(content));
+                    truncated.add(UserMessage.from(cut));
                 } else if (msg instanceof AiMessage) {
-                    truncated.add(AiMessage.from(content));
+                    truncated.add(AiMessage.from(cut));
+                } else {
+                    truncated.add(msg);
                 }
             } else {
                 truncated.add(msg);
             }
         }
-
         return truncated;
     }
 
@@ -496,21 +452,41 @@ public class ContextCompressor {
     //region 辅助方法
 
     /**
-     * 估算 Token 数
+     * 估算整个消息列表的 Token 数（保守：宁可高估）。
      */
     private int estimateTokens(List<ChatMessage> messages) {
         int total = 0;
         for (ChatMessage msg : messages) {
-            String content = getMessageContent(msg);
-            if (content != null) {
-                total += content.length() / AVG_TOKENS_PER_CHAR;
-            }
+            total += estimateTokens(getMessageContent(msg));
         }
         return total;
     }
 
     /**
-     * 获取消息内容
+     * 估算单段文本的 Token 数。
+     * <p>经验值（保守上界）：CJK 字符约 1 token/字，其余字符约 0.3 token/字符。
+     * 原实现用"字符数/3"，对中文低估约 3 倍，会导致压缩触发过晚。
+     */
+    private int estimateTokens(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        int cjk = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            boolean isCjk = (c >= 0x4E00 && c <= 0x9FFF)   // 中日韩统一表意文字
+                    || (c >= 0x3000 && c <= 0x303F)         // CJK 标点
+                    || (c >= 0xFF00 && c <= 0xFFEF);        // 全角字符
+            if (isCjk) {
+                cjk++;
+            }
+        }
+        int other = text.length() - cjk;
+        return cjk + (int) Math.ceil(other * 0.3);
+    }
+
+    /**
+     * 获取消息内容。
      */
     private String getMessageContent(ChatMessage message) {
         if (message == null) {
@@ -527,24 +503,44 @@ public class ContextCompressor {
     }
 
     /**
-     * 合并缓冲区中的短消息
+     * 定位第一条系统消息，找不到返回 -1。
+     */
+    private int indexOfSystemMessage(List<ChatMessage> messages) {
+        for (int i = 0; i < messages.size(); i++) {
+            if (messages.get(i) instanceof SystemMessage) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * 合并缓冲区中的短消息，**保持原角色**。
+     * 缓冲区按角色分组构造，因此这里要么全是 UserMessage，要么全是 AiMessage。
      */
     private ChatMessage mergeBuffer(List<ChatMessage> buffer) {
+        if (buffer.size() == 1) {
+            return buffer.get(0);
+        }
         String merged = buffer.stream()
                 .map(this::getMessageContent)
                 .filter(Objects::nonNull)
                 .collect(Collectors.joining(" | "));
+
+        if (buffer.get(0) instanceof AiMessage) {
+            return AiMessage.from("[合并] " + merged);
+        }
         return UserMessage.from("[合并] " + merged);
     }
 
     /**
-     * 生成 LLM 摘要
+     * 生成 LLM 摘要。
      */
     private String generateSummary(List<ChatMessage> messages) {
         String content = messages.stream()
                 .map(msg -> {
-                    String role = msg instanceof UserMessage ? "用户" :
-                            msg instanceof AiMessage ? "助手" : "系统";
+                    String role = msg instanceof UserMessage ? "用户"
+                            : msg instanceof AiMessage ? "助手" : "系统";
                     return role + ": " + getMessageContent(msg);
                 })
                 .collect(Collectors.joining("\n"));
@@ -569,7 +565,6 @@ public class ContextCompressor {
 
         try {
             String summary = deepSeekModel.chat(prompt);
-            // 清理可能的多余内容
             if (summary.length() > 500) {
                 summary = summary.substring(0, 500);
             }
@@ -581,14 +576,12 @@ public class ContextCompressor {
     }
 
     /**
-     * 提取类名
+     * 提取类名。
      */
     private List<String> extractClassNames(String text) {
         List<String> results = new ArrayList<>();
-        // 简单正则：匹配驼峰命名且以大写字母开头
         java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-                "\\b([A-Z][a-zA-Z0-9]+(Service|Controller|Manager|Util|Helper|Repository|Entity|DTO|VO|DAO))\\b"
-        );
+                "\\b([A-Z][a-zA-Z0-9]+(Service|Controller|Manager|Util|Helper|Repository|Entity|DTO|VO|DAO))\\b");
         java.util.regex.Matcher matcher = pattern.matcher(text);
         while (matcher.find()) {
             results.add(matcher.group(1));
@@ -597,14 +590,12 @@ public class ContextCompressor {
     }
 
     /**
-     * 提取方法名
+     * 提取方法名。
      */
     private List<String> extractMethodNames(String text) {
         List<String> results = new ArrayList<>();
-        // 简单正则：匹配小写开头的方法名模式
         java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-                "\\b([a-z][a-zA-Z0-9]*(ById|ByName|ByUser|find|get|set|create|update|delete|save|list)\\w*)\\b"
-        );
+                "\\b([a-z][a-zA-Z0-9]*(ById|ByName|ByUser|find|get|set|create|update|delete|save|list)\\w*)\\b");
         java.util.regex.Matcher matcher = pattern.matcher(text);
         while (matcher.find()) {
             results.add(matcher.group(1));
@@ -613,29 +604,25 @@ public class ContextCompressor {
     }
 
     /**
-     * 降级压缩
+     * 降级压缩：只保留系统提示 + 最近 N 条。
      */
     private List<ChatMessage> fallbackCompress(List<ChatMessage> messages) {
         log.warn("使用降级压缩方案");
         List<ChatMessage> result = new ArrayList<>();
 
-        // 保留系统提示
-        for (ChatMessage msg : messages) {
-            if (msg instanceof SystemMessage) {
-                result.add(msg);
-                break;
-            }
+        int systemIdx = indexOfSystemMessage(messages);
+        if (systemIdx >= 0) {
+            result.add(messages.get(systemIdx));
         }
 
-        // 保留最近的消息
         int start = Math.max(0, messages.size() - keepRecent);
         for (int i = start; i < messages.size(); i++) {
             ChatMessage msg = messages.get(i);
-            if (!(msg instanceof SystemMessage) || result.contains(msg)) {
-                result.add(msg);
+            if (msg instanceof SystemMessage) {
+                continue;
             }
+            result.add(msg);
         }
-
         return result;
     }
 
