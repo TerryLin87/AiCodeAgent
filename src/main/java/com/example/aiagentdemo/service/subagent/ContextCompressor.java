@@ -87,7 +87,7 @@ public class ContextCompressor {
 
         // 条件1：消息数量超过阈值
         if (messages.size() > maxMessages) {
-            log.info("📊 消息数量 {} > {}, 需要压缩", messages.size(), maxMessages);
+            log.info("消息数量 {} > {}, 需要压缩", messages.size(), maxMessages);
             return true;
         }
 
