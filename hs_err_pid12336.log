@@ -1,0 +1,297 @@
+#
+# There is insufficient memory for the Java Runtime Environment to continue.
+# Native memory allocation (mmap) failed to map 264241152 bytes. Error detail: G1 virtual space
+# Possible reasons:
+#   The system is out of physical RAM or swap space
+#   This process is running with CompressedOops enabled, and the Java Heap may be blocking the growth of the native heap
+# Possible solutions:
+#   Reduce memory load on the system
+#   Increase physical memory or swap space
+#   Check if swap backing store is full
+#   Decrease Java heap size (-Xmx/-Xms)
+#   Decrease number of Java threads
+#   Decrease Java thread stack sizes (-Xss)
+#   Set larger code cache with -XX:ReservedCodeCacheSize=
+#   JVM is running with Zero Based Compressed Oops mode in which the Java heap is
+#     placed in the first 32GB address space. The Java Heap base address is the
+#     maximum limit for the native heap growth. Please use -XX:HeapBaseMinAddress
+#     to set the Java Heap base and to place the Java Heap above 32GB virtual address.
+# This output file may be truncated or incomplete.
+#
+#  Out of Memory Error (os_windows.cpp:3830), pid=12336, tid=22292
+#
+# JRE version:  (17.0.14+1) (build )
+# Java VM: OpenJDK 64-Bit Server VM (17.0.14+1-b1367.22, mixed mode, emulated-client, sharing, tiered, compressed oops, compressed class ptrs, g1 gc, windows-amd64)
+# No core dump will be written. Minidumps are not enabled by default on client versions of Windows
+#
+
+---------------  S U M M A R Y ------------
+
+Command Line: -agentlib:jdwp=transport=dt_socket,address=127.0.0.1:60764,suspend=y,server=n -javaagent:C:\Users\honor\AppData\Local\JetBrains\IntelliJIdea2025.2\captureAgent\debugger-agent.jar=file:///C:/Users/honor/AppData/Local/Temp/capture6877866251110153701.props -agentpath:C:\Users\honor\AppData\Local\Temp\idea_libasyncProfiler_dll_temp_folder30373\libasyncProfiler.dll=version,jfr,event=wall,interval=10ms,cstack=no,file=C:\Users\honor\IdeaSnapshots\AiAgentDemoApplication_2026_09_24_224955.jfr,dbghelppath=C:\Users\honor\AppData\Local\Temp\idea_dbghelp_dll_temp_folder3734\dbghelp.dll,log=C:\Users\honor\AppData\Local\Temp\AiAgentDemoApplication_2026_09_24_224955.jfr.log.txt,logLevel=DEBUG -XX:TieredStopAtLevel=1 -Dspring.output.ansi.enabled=always -Dcom.sun.management.jmxremote -Dspring.jmx.enabled=true -Dspring.liveBeansView.mbeanDomain -Dspring.application.admin.enabled=true -Dmanagement.endpoints.jmx.exposure.include=* -Dkotlinx.coroutines.debug.enable.creation.stack.trace=false -Ddebugger.agent.enable.coroutines=true -Dkotlinx.coroutines.debug.enable.flows.stack.trace=true -Dkotlinx.coroutines.debug.enable.mutable.state.flows.stack.trace=true -Dfile.encoding=UTF-8 com.example.aiagentdemo.AiAgentDemoApplication
+
+Host: 12th Gen Intel(R) Core(TM) i5-12500H, 16 cores, 15G,  Windows 11 , 64 bit Build 22621 (10.0.22621.5415)
+Time: Thu Sep 24 22:49:56 2026  Windows 11 , 64 bit Build 22621 (10.0.22621.5415) elapsed time: 0.029734 seconds (0d 0h 0m 0s)
+
+---------------  T H R E A D  ---------------
+
+Current thread (0x0000021988a5e8b0):  JavaThread "Unknown thread" [_thread_in_vm, id=22292, stack(0x0000008c67600000,0x0000008c67700000)]
+
+Stack: [0x0000008c67600000,0x0000008c67700000]
+Native frames: (J=compiled Java code, j=interpreted, Vv=VM code, C=native code)
+V  [jvm.dll+0x68b969]  os::platform_print_native_stack+0xd9  (os_windows_x86.cpp:235)
+V  [jvm.dll+0x84572a]  VMError::report+0xc6a  (vmError.cpp:868)
+V  [jvm.dll+0x8473ae]  VMError::report_and_die+0x78e  (vmError.cpp:1766)
+V  [jvm.dll+0x847a13]  VMError::report_and_die+0x43  (vmError.cpp:1552)
+V  [jvm.dll+0x24a83f]  report_vm_out_of_memory+0x8f  (debug.cpp:321)
+V  [jvm.dll+0x688629]  os::pd_commit_memory_or_exit+0xc9  (os_windows.cpp:3838)
+V  [jvm.dll+0x67cf3a]  os::commit_memory_or_exit+0x2a  (os.cpp:1768)
+V  [jvm.dll+0x30b83b]  G1PageBasedVirtualSpace::commit+0x19b  (g1PageBasedVirtualSpace.cpp:204)
+V  [jvm.dll+0x312d26]  G1RegionsLargerThanCommitSizeMapper::commit_regions+0x96  (g1RegionToSpaceMapper.cpp:100)
+V  [jvm.dll+0x3630fe]  HeapRegionManager::expand_any+0xee  (heapRegionManager.cpp:363)
+V  [jvm.dll+0x36333f]  HeapRegionManager::expand_by+0x7f  (heapRegionManager.cpp:380)
+V  [jvm.dll+0x2e18cc]  G1CollectedHeap::expand+0xbc  (g1CollectedHeap.cpp:1292)
+V  [jvm.dll+0x2e2824]  G1CollectedHeap::initialize+0x664  (g1CollectedHeap.cpp:1713)
+V  [jvm.dll+0x815ffb]  universe_init+0xbb  (universe.cpp:737)
+V  [jvm.dll+0x370e88]  init_globals+0x48  (init.cpp:131)
+V  [jvm.dll+0x7f4875]  Threads::create_vm+0x5e5  (thread.cpp:2909)
+V  [jvm.dll+0x3f54ef]  JNI_CreateJavaVM_inner+0x8f  (jni.cpp:3654)
+V  [jvm.dll+0x3f70c1]  JNI_CreateJavaVM+0x11  (jni.cpp:3746)
+C  [jli.dll+0x52ab]  JavaMain+0x113  (java.c:413)
+C  [ucrtbase.dll+0x29333]
+C  [KERNEL32.DLL+0x1259d]
+C  [ntdll.dll+0x5af78]
+
+
+---------------  P R O C E S S  ---------------
+
+Threads class SMR info:
+_java_thread_list=0x00007fff3baf9018, length=0, elements={
+}
+
+Java Threads: ( => current thread )
+
+Other Threads:
+  0x000002198d10c7b0 GCTaskThread "GC Thread#0" [stack: 0x0000008c67700000,0x0000008c67800000] [id=26036]
+  0x000002198d11d3f0 ConcurrentGCThread "G1 Main Marker" [stack: 0x0000008c67800000,0x0000008c67900000] [id=26312]
+  0x000002198d11dd20 ConcurrentGCThread "G1 Conc#0" [stack: 0x0000008c67900000,0x0000008c67a00000] [id=22564]
+
+[error occurred during error reporting (printing all threads), id 0xc0000005, EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=0x00007fff3b2a2197]
+
+VM state: not at safepoint (not fully initialized)
+
+VM Mutex/Monitor currently owned by a thread:  ([mutex/lock_event])
+[0x000002198d09a390] Heap_lock - owner thread: 0x0000021988a5e8b0
+
+Heap address: 0x0000000704400000, size: 4028 MB, Compressed Oops mode: Zero based, Oop shift amount: 3
+
+CDS archive(s) mapped at: [0x0000000000000000-0x0000000000000000-0x0000000000000000), size 0, SharedBaseAddress: 0x0000000800000000, ArchiveRelocationMode: 1.
+Narrow klass base: 0x0000000000000000, Narrow klass shift: 0, Narrow klass range: 0x0
+
+GC Precious Log:
+<Empty>
+
+Heap:
+ garbage-first heap   total 0K, used 0K [0x0000000704400000, 0x0000000800000000)
+  region size 2048K, 0 young (0K), 0 survivors (0K)
+ Metaspace       used 0K, committed 0K, reserved 0K
+  class space    used 0K, committed 0K, reserved 0K
+
+Heap Regions: E=young(eden), S=young(survivor), O=old, HS=humongous(starts), HC=humongous(continues), CS=collection set, F=free, OA=open archive, CA=closed archive, TAMS=top-at-mark-start (previous, next)
+
+Card table byte_map: [0x00000219917f0000,0x0000021991fd0000] _byte_map_base: 0x000002198dfce000
+
+Marking Bits (Prev, Next): (CMBitMap*) 0x000002198d10cce0, (CMBitMap*) 0x000002198d10cd20
+ Prev Bits: [0x00000219927b0000, 0x00000219966a0000)
+ Next Bits: [0x00000219966a0000, 0x000002199a590000)
+
+GC Heap History (0 events):
+No events
+
+Dll operation events (2 events):
+Event: 0.014 Loaded shared library C:\Users\honor\.jdks\jbr-17.0.14\bin\java.dll
+Event: 0.016 Loaded shared library C:\Users\honor\.jdks\jbr-17.0.14\bin\zip.dll
+
+Deoptimization events (0 events):
+No events
+
+Classes loaded (0 events):
+No events
+
+Classes unloaded (0 events):
+No events
+
+Classes redefined (0 events):
+No events
+
+Internal exceptions (0 events):
+No events
+
+VM Operations (0 events):
+No events
+
+Memory protections (0 events):
+No events
+
+Nmethod flushes (0 events):
+No events
+
+Events (0 events):
+No events
+
+
+Dynamic libraries:
+0x00007ff70f600000 - 0x00007ff70f60a000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\java.exe
+0x00007ff813c90000 - 0x00007ff813ea8000 	C:\Windows\SYSTEM32\ntdll.dll
+0x00007ff811dd0000 - 0x00007ff811e94000 	C:\Windows\System32\KERNEL32.DLL
+0x00007ff810e60000 - 0x00007ff811233000 	C:\Windows\System32\KERNELBASE.dll
+0x00007ff8112c0000 - 0x00007ff8113d1000 	C:\Windows\System32\ucrtbase.dll
+0x00007ff80aae0000 - 0x00007ff80aaf7000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\jli.dll
+0x00007ff808c20000 - 0x00007ff808c3b000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\VCRUNTIME140.dll
+0x00007ff8130c0000 - 0x00007ff813272000 	C:\Windows\System32\USER32.dll
+0x00007ff8113e0000 - 0x00007ff811406000 	C:\Windows\System32\win32u.dll
+0x00007ff812630000 - 0x00007ff812659000 	C:\Windows\System32\GDI32.dll
+0x00007ff811810000 - 0x00007ff81192b000 	C:\Windows\System32\gdi32full.dll
+0x00007ff811580000 - 0x00007ff81161a000 	C:\Windows\System32\msvcp_win.dll
+0x00007ff800bd0000 - 0x00007ff800e6c000 	C:\Windows\WinSxS\amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.22621.6060_none_2712eda17382d24b\COMCTL32.dll
+0x00007ff813280000 - 0x00007ff813327000 	C:\Windows\System32\msvcrt.dll
+0x00007ff811a00000 - 0x00007ff811a31000 	C:\Windows\System32\IMM32.DLL
+0x000000005e190000 - 0x000000005e19d000 	D:\tools\360\360\360Safe\safemon\SafeWrapper.dll
+0x00007ff811930000 - 0x00007ff8119e1000 	C:\Windows\System32\ADVAPI32.dll
+0x00007ff811d20000 - 0x00007ff811dc8000 	C:\Windows\System32\sechost.dll
+0x00007ff811620000 - 0x00007ff811648000 	C:\Windows\System32\bcrypt.dll
+0x00007ff812170000 - 0x00007ff812288000 	C:\Windows\System32\RPCRT4.dll
+0x00007ff80ea80000 - 0x00007ff80eb85000 	D:\tools\360\360\360Safe\safemon\libzdtp64.dll
+0x00007ff812660000 - 0x00007ff812efc000 	C:\Windows\System32\SHELL32.dll
+0x00007ff8116d0000 - 0x00007ff81180f000 	C:\Windows\System32\wintypes.dll
+0x00007ff813330000 - 0x00007ff8136c1000 	C:\Windows\System32\combase.dll
+0x00007ff811ee0000 - 0x00007ff811f49000 	C:\Windows\System32\SHLWAPI.dll
+0x00007ff8108b0000 - 0x00007ff8108ba000 	C:\Windows\SYSTEM32\VERSION.dll
+0x00007ff80a890000 - 0x00007ff80a89c000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\vcruntime140_1.dll
+0x00007ffffb400000 - 0x00007ffffb48d000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\msvcp140.dll
+0x00007fff3afb0000 - 0x00007fff3bc3e000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\server\jvm.dll
+0x00007ff811f50000 - 0x00007ff811fc1000 	C:\Windows\System32\WS2_32.dll
+0x00007ff810c70000 - 0x00007ff810cbd000 	C:\Windows\SYSTEM32\POWRPROF.dll
+0x00007ff809460000 - 0x00007ff809494000 	C:\Windows\SYSTEM32\WINMM.dll
+0x00007ff810c50000 - 0x00007ff810c63000 	C:\Windows\SYSTEM32\UMPDC.dll
+0x00007ff80fc90000 - 0x00007ff80fca8000 	C:\Windows\SYSTEM32\kernel.appcore.dll
+0x00007ff808c10000 - 0x00007ff808c1a000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\jimage.dll
+0x00007ff80e680000 - 0x00007ff80e8b3000 	C:\Windows\SYSTEM32\DBGHELP.DLL
+0x00007ff812450000 - 0x00007ff812528000 	C:\Windows\System32\OLEAUT32.dll
+0x00007fffdc760000 - 0x00007fffdc792000 	C:\Windows\SYSTEM32\dbgcore.DLL
+0x00007ff811240000 - 0x00007ff8112bb000 	C:\Windows\System32\bcryptPrimitives.dll
+0x00007ffffb2d0000 - 0x00007ffffb30b000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\jdwp.dll
+0x00007ffffb750000 - 0x00007ffffb75e000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\instrument.dll
+0x00007ff803580000 - 0x00007ff8035a5000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\java.dll
+0x00007fff75440000 - 0x00007fff75651000 	C:\Users\honor\AppData\Local\Temp\idea_libasyncProfiler_dll_temp_folder30373\libasyncProfiler.dll
+0x00007ff803560000 - 0x00007ff803578000 	C:\Users\honor\.jdks\jbr-17.0.14\bin\zip.dll
+
+dbghelp: loaded successfully - version: 4.0.5 - missing functions: none
+symbol engine: initialized successfully - sym options: 0x614 - pdb path: .;C:\Users\honor\.jdks\jbr-17.0.14\bin;C:\Windows\SYSTEM32;C:\Windows\WinSxS\amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.22621.6060_none_2712eda17382d24b;D:\tools\360\360\360Safe\safemon;C:\Users\honor\.jdks\jbr-17.0.14\bin\server;C:\Users\honor\AppData\Local\Temp\idea_libasyncProfiler_dll_temp_folder30373
+
+VM Arguments:
+jvm_args: -agentlib:jdwp=transport=dt_socket,address=127.0.0.1:60764,suspend=y,server=n -javaagent:C:\Users\honor\AppData\Local\JetBrains\IntelliJIdea2025.2\captureAgent\debugger-agent.jar=file:///C:/Users/honor/AppData/Local/Temp/capture6877866251110153701.props -agentpath:C:\Users\honor\AppData\Local\Temp\idea_libasyncProfiler_dll_temp_folder30373\libasyncProfiler.dll=version,jfr,event=wall,interval=10ms,cstack=no,file=C:\Users\honor\IdeaSnapshots\AiAgentDemoApplication_2026_09_24_224955.jfr,dbghelppath=C:\Users\honor\AppData\Local\Temp\idea_dbghelp_dll_temp_folder3734\dbghelp.dll,log=C:\Users\honor\AppData\Local\Temp\AiAgentDemoApplication_2026_09_24_224955.jfr.log.txt,logLevel=DEBUG -XX:TieredStopAtLevel=1 -Dspring.output.ansi.enabled=always -Dcom.sun.management.jmxremote -Dspring.jmx.enabled=true -Dspring.liveBeansView.mbeanDomain -Dspring.application.admin.enabled=true -Dmanagement.endpoints.jmx.exposure.include=* -Dkotlinx.coroutines.debug.enable.creation.stack.trace=false -Ddebugger.agent.enable.coroutines=true -Dkotlinx.coroutines.debug.enable.flows.stack.trace=true -Dkotlinx.coroutines.debug.enable.mutable.state.flows.stack.trace=true -Dfile.encoding=UTF-8 
+java_command: com.example.aiagentdemo.AiAgentDemoApplication
+java_class_path (initial): I:\bfcode\AiAgentDemo\target\classes;C:\Users\honor\.m2\repository\org\springframework\boot\spring-boot-starter\4.0.6\spring-boot-starter-4.0.6.jar;C:\Users\honor\.m2\repository\org\springframework\boot\spring-boot-starter-logging\4.0.6\spring-boot-starter-logging-4.0.6.jar;C:\Users\honor\.m2\repository\ch\qos\logback\logback-classic\1.5.32\logback-classic-1.5.32.jar;C:\Users\honor\.m2\repository\ch\qos\logback\logback-core\1.5.32\logback-core-1.5.32.jar;C:\Users\honor\.m2\repository\org\apache\logging\log4j\log4j-to-slf4j\2.25.4\log4j-to-slf4j-2.25.4.jar;C:\Users\honor\.m2\repository\org\apache\logging\log4j\log4j-api\2.25.4\log4j-api-2.25.4.jar;C:\Users\honor\.m2\repository\org\slf4j\jul-to-slf4j\2.0.17\jul-to-slf4j-2.0.17.jar;C:\Users\honor\.m2\repository\org\springframework\boot\spring-boot-autoconfigure\4.0.6\spring-boot-autoconfigure-4.0.6.jar;C:\Users\honor\.m2\repository\org\springframework\boot\spring-boot\4.0.6\spring-boot-4.0.6.jar;C:\Users\honor\.m2\repository\org\springframework\spring-context\7.0.7\spring-context-7.0.7.jar;C:\Users\honor\.m2\repository\jakarta\annotation\jakarta.annotation-api\3.0.0\jakarta.annotation-api-3.0.0.jar;C:\Users\honor\.m2\repository\org\yaml\snakeyaml\2.5\snakeyaml-2.5.jar;C:\Users\honor\.m2\repository\org\springframework\boot\spring-boot-starter-web\4.0.6\spring-boot-starter-web-4.0.6.jar;C:\Users\honor\.m2\repository\org\springframework\boot\spring-boot-starter-jackson\4.0.6\spring-boot-starter-jackson-4.0.6.jar;C:\Users\honor\.m2\repository\org\springframework\boot\spring-boot-jackson\4.0.6\spring-boot-jackson-4.0.6.jar;C:\Users\honor\.m2\repository\tools\jackson\core\jackson-databind\3.1.2\jackson-databind-3.1.2.jar;C:\Users\honor\.m2\repository\tools\jackson\core\jackson-core\3.1.2\jackson-core-3.1.2.jar;C:\Users\honor\.m2\repository\org\springframework\boot\spring-boot-starter-tomcat\4.0.6\spring-boot-starter-tomcat-4.0.6.jar;C:\Users\honor\.m2\repository\org\springframework\boot\spring-bo
+Launcher Type: SUN_STANDARD
+
+[Global flags]
+     intx CICompilerCount                          = 12                                        {product} {ergonomic}
+     uint ConcGCThreads                            = 3                                         {product} {ergonomic}
+     uint G1ConcRefinementThreads                  = 13                                        {product} {ergonomic}
+   size_t G1HeapRegionSize                         = 2097152                                   {product} {ergonomic}
+    uintx GCDrainStackTargetSize                   = 64                                        {product} {ergonomic}
+   size_t InitialHeapSize                          = 264241152                                 {product} {ergonomic}
+     bool ManagementServer                         = true                                      {product} {command line}
+   size_t MarkStackSize                            = 4194304                                   {product} {ergonomic}
+   size_t MaxHeapSize                              = 4223664128                                {product} {ergonomic}
+   size_t MinHeapDeltaBytes                        = 2097152                                   {product} {ergonomic}
+   size_t MinHeapSize                              = 8388608                                   {product} {ergonomic}
+    uintx NonProfiledCodeHeapSize                  = 0                                      {pd product} {ergonomic}
+     bool ProfileInterpreter                       = false                                  {pd product} {command line}
+    uintx ProfiledCodeHeapSize                     = 0                                      {pd product} {ergonomic}
+   size_t SoftMaxHeapSize                          = 4223664128                             {manageable} {ergonomic}
+     intx TieredStopAtLevel                        = 1                                         {product} {command line}
+     bool UseCompressedClassPointers               = true                           {product lp64_product} {ergonomic}
+     bool UseCompressedOops                        = true                           {product lp64_product} {ergonomic}
+     bool UseG1GC                                  = true                                      {product} {ergonomic}
+     bool UseLargePagesIndividualAllocation        = false                                  {pd product} {ergonomic}
+
+Logging:
+Log output configuration:
+ #0: stdout all=warning uptime,level,tags
+ #1: stderr all=off uptime,level,tags
+
+Environment Variables:
+JAVA_HOME=C:\Users\honor\.jdks\jbr-17.0.14
+PATH=C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\Microsoft SQL Server\150\Tools\Binn\;C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\;J:\NewASSDK\platform-tools;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Users\honor\.jdks\jbr-17.0.14\bin;C:\Program Files\Docker\Docker\resources\bin;H:\tools\apache-maven-3.8.6-bin\apache-maven-3.8.6\bin;C:\Users\honor\AppData\Roaming\npm;H:\开发工具\wechat\微信web开发者工具\dll;H:\tools\Git\bin;H:\tools\qt\Tools\CMake_64\bin;C:\Program Files\dotnet\;C:\Users\honor\AppData\Local\Programs\Ollama;H:\tools\tools\python;H:\tools\tools\python\Scripts;J:\Tool\anaconda\Scripts;J:\Tool\anaconda;C:\Program Files\MySQL\MySQL Server 8.0\bin;H:\tools\tools\nodes\;H:\tools\tools\python\Scripts\;H:\tools\tools\python\;H:\tools\python3135\Scripts;C:\Users\honor\AppData\Local\Microsoft\WindowsApps;C:\Users\honor\AppData\Local\Programs\Ollama;F:\tools\idea\IntelliJ IDEA 2025.2\bin;C:\Users\honor\.dotnet\tools;C:\Users\honor\AppData\Roaming\npm
+USERNAME=honor
+OS=Windows_NT
+PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 154 Stepping 3, GenuineIntel
+TMP=C:\Users\honor\AppData\Local\Temp
+TEMP=C:\Users\honor\AppData\Local\Temp
+
+
+
+Periodic native trim disabled
+
+JNI global refs:
+JNI global refs: 0, weak refs: 0
+
+JNI global refs memory usage: 0, weak refs: 0
+
+Process memory usage:
+Resident Set Size: 50284K (0% of 16495096K total physical memory with 2243292K free physical memory)
+
+OOME stack traces (most recent first):
+Classloader memory used:
+
+
+---------------  S Y S T E M  ---------------
+
+OS:
+ Windows 11 , 64 bit Build 22621 (10.0.22621.5415)
+OS uptime: 5 days 9:14 hours
+Hyper-V role detected
+
+CPU: total 16 (initial active 16) (8 cores per cpu, 2 threads per core) family 6 model 154 stepping 3 microcode 0x41b, cx8, cmov, fxsr, ht, mmx, 3dnowpref, sse, sse2, sse3, ssse3, sse4.1, sse4.2, popcnt, lzcnt, tsc, tscinvbit, avx, avx2, aes, erms, clmul, bmi1, bmi2, adx, sha, fma, vzeroupper, clflush, clflushopt, clwb, hv
+Processor Information for processor 0
+  Max Mhz: 2500, Current Mhz: 2500, Mhz Limit: 2500
+Processor Information for processor 1
+  Max Mhz: 2500, Current Mhz: 1532, Mhz Limit: 2500
+Processor Information for processor 2
+  Max Mhz: 2500, Current Mhz: 2500, Mhz Limit: 2500
+Processor Information for processor 3
+  Max Mhz: 2500, Current Mhz: 2500, Mhz Limit: 2500
+Processor Information for processor 4
+  Max Mhz: 2500, Current Mhz: 2500, Mhz Limit: 2500
+Processor Information for processor 5
+  Max Mhz: 2500, Current Mhz: 2500, Mhz Limit: 2500
+Processor Information for processor 6
+  Max Mhz: 2500, Current Mhz: 2500, Mhz Limit: 2500
+Processor Information for processor 7
+  Max Mhz: 2500, Current Mhz: 2500, Mhz Limit: 2500
+Processor Information for processor 8
+  Max Mhz: 2500, Current Mhz: 1800, Mhz Limit: 1800
+Processor Information for processor 9
+  Max Mhz: 2500, Current Mhz: 1800, Mhz Limit: 1800
+Processor Information for processor 10
+  Max Mhz: 2500, Current Mhz: 1800, Mhz Limit: 1800
+Processor Information for processor 11
+  Max Mhz: 2500, Current Mhz: 1800, Mhz Limit: 1800
+Processor Information for processor 12
+  Max Mhz: 2500, Current Mhz: 1800, Mhz Limit: 1800
+Processor Information for processor 13
+  Max Mhz: 2500, Current Mhz: 1800, Mhz Limit: 1800
+Processor Information for processor 14
+  Max Mhz: 2500, Current Mhz: 1800, Mhz Limit: 1800
+Processor Information for processor 15
+  Max Mhz: 2500, Current Mhz: 1800, Mhz Limit: 1800
+
+Memory: 4k page, system-wide physical 16108M (2190M free)
+TotalPageFile size 20203M (AvailPageFile size 160M)
+current process WorkingSet (physical memory assigned to process): 49M, peak: 49M
+current process commit charge ("private bytes"): 111M, peak: 330M
+
+vm_info: OpenJDK 64-Bit Server VM (17.0.14+1-b1367.22) for windows-amd64 JRE (17.0.14+1-b1367.22), built on 2025-01-30 by "builduser" with MS VC++ 16.10 / 16.11 (VS2019)
+
+END.
