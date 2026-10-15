@@ -7,7 +7,7 @@ import com.example.aiagentdemo.instances.subagent.ISubAgent;
 import com.example.aiagentdemo.service.CallRelationService;
 import com.example.aiagentdemo.service.CodeRetrievalService;
 import com.example.aiagentdemo.tools.ProjectStructureTool;
-import com.example.aiagentdemo.tools.newtools.FileSystemTools;
+import com.example.aiagentdemo.tools.ReadFileTool;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -33,7 +33,7 @@ public class ExploreSubAgent implements ISubAgent {
     private CodeRetrievalService retrievalService;
 
     @Autowired
-    private FileSystemTools fileSystemTools;
+    private ReadFileTool fileSystemTools;
 
     @Autowired
     private ProjectStructureTool projectStructureTool;
@@ -389,7 +389,23 @@ public class ExploreSubAgent implements ISubAgent {
         if (CollectionUtils.isEmpty(results)) {
             return "未找到类: " + className;
         }
-        return "类信息: " + className + "（共 " + results.size() + " 条相关记录）";
+        StringBuilder sb = new StringBuilder();
+        sb.append("类信息: ").append(className).append("\n");
+        sb.append("=".repeat(50)).append("\n");
+        for (RetrievedCode code : results) {
+            sb.append("【").append(code.getSegmentType()).append("】")
+                    .append(code.getClassName());
+            if (code.getMethodName() != null) {
+                sb.append(".").append(code.getMethodName());
+            }
+            sb.append("\n");
+            String content = code.getContent();
+            if (content != null && content.length() > 500) {
+                content = content.substring(0, 500) + "...";
+            }
+            sb.append(content).append("\n\n");
+        }
+        return sb.toString();
     }
 
     //endregion

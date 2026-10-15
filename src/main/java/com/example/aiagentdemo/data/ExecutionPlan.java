@@ -5,6 +5,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Data
@@ -17,4 +18,5 @@ public class ExecutionPlan {
     private String estimatedComplexity;     // 复杂度: simple/medium/complex
     private int currentStepIndex;           // 当前执行到的步骤索引
     private int status;                  // 匹配PlanStatus枚举
+    private LocalDateTime createAt;
 }

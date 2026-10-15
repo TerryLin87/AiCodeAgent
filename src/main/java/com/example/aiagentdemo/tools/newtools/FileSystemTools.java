@@ -10,8 +10,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
-@Slf4j
-@Component
 public class FileSystemTools {
     private final PathMatcher pathMatcher;
 
@@ -47,7 +45,7 @@ public class FileSystemTools {
             }
             return content;
         }catch (Exception e){
-            log.error("读取文件失败:{}",path,e);
+//            log.error("读取文件失败:{}",path,e);
             return "读取文件失败："+e.getMessage();
         }
     }

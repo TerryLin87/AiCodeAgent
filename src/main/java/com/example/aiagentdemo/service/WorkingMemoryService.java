@@ -39,32 +39,6 @@ public class WorkingMemoryService {
     }
 
     /**
-     * 从计划创建工作记忆
-     */
-    public WorkingMemory createFromPlan(String sessionId, ExecutionPlan plan) {
-        WorkingMemory memory = create(sessionId, plan.getGoal());
-
-        // 将计划中的步骤转换为工作记忆步骤
-        for (int i = 0; i < plan.getSteps().size(); i++) {
-            ExecutionPlanStep planStep = plan.getSteps().get(i);
-            WorkingMemory.StepRecord step = WorkingMemory.StepRecord.builder()
-                    .order(i)
-                    .action(planStep.getAction())
-                    .params(planStep.getParams())
-                    .description(planStep.getDescription())
-                    .status(PlanStatus.PENDING.getCode())
-                    .timestamp(LocalDateTime.now())
-                    .build();
-            memory.addStep(step);
-        }
-
-        memory.setCurrentPhase("executing");
-        memoryStore.put(sessionId, memory);
-        log.info("从计划创建工作记忆: sessionId={}, steps={}", sessionId, memory.getSteps().size());
-        return memory;
-    }
-
-    /**
      * 获取工作记忆
      */
     public WorkingMemory get(String sessionId) {
@@ -125,7 +99,7 @@ public class WorkingMemoryService {
     public Map<String, Object> getStats() {
         Map<String, Object> stats = new java.util.HashMap<>();
         stats.put("totalSessions", memoryStore.size());
-        stats.put("activeSessions", memoryStore.keySet());
+        stats.put("activeSessions", memoryStore.size());
         return stats;
     }
 }

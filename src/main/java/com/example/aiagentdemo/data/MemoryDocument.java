@@ -20,4 +20,5 @@ public class MemoryDocument {
     private String summary;           // 可选：对长内容的摘要
     private LocalDateTime timestamp;
     private Map<String, Object> metadata; // 可扩展的元数据
+    private Double score;//分数
 }

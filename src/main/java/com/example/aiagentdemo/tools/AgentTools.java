@@ -1,6 +1,7 @@
 package com.example.aiagentdemo.tools;
 
 import com.example.aiagentdemo.data.subagent.SubAgentResult;
+import com.example.aiagentdemo.service.CallRelationService;
 import com.example.aiagentdemo.service.CodeRetrievalService;
 import com.example.aiagentdemo.service.subagent.SubAgentScheduler;
 import dev.langchain4j.agent.tool.P;
@@ -23,12 +24,35 @@ public class AgentTools {
 
     @Autowired
     private ProjectStructureTool projectStructureTool;
-    
+
     @Autowired
     private SubAgentScheduler subAgentScheduler;
 
     @Autowired
     private ReadFileTool readFileTool;
+
+    @Autowired
+    private CallRelationService callRelationService;
+
+    @Autowired
+    private ToolCallGuard toolCallGuard;
+
+    /** 工具调用上限的统一提示语 */
+    private static final String TOOL_LIMIT_MESSAGE =
+            "[系统提示] 工具调用次数已达上限，请基于已有信息给出最终答案。";
+
+    /**
+     * 统一的前置检查：是否允许继续调用工具。
+     * 超限返回提示语，调用方应直接返回该提示。
+     */
+    private String checkToolCall(String toolName) {
+        String sessionId = ToolCallGuard.getCurrentSession();
+        if (sessionId != null && !toolCallGuard.tryAcquire(sessionId)) {
+            log.warn("工具 {} 被 ToolCallGuard 拦截（会话 {} 已达上限）", toolName, sessionId);
+            return TOOL_LIMIT_MESSAGE;
+        }
+        return null;   // null 表示允许继续
+    }
 
     /**
      * 工具1: 搜索代码
@@ -36,6 +60,9 @@ public class AgentTools {
     @Tool("在代码库中搜索相关代码片段。当需要找到某个类或方法时使用。")
     public String searchCode(
             @P("搜索关键词，如类名、方法名") String query) {
+        String limit = checkToolCall("searchCode");
+        if (limit != null) return limit;
+
         log.info("Tool: searchCode, query={}", query);
         var results = retrievalService.search(query, 5, null, 0.5);
         if (results.isEmpty()) {
@@ -50,6 +77,9 @@ public class AgentTools {
     @Tool("读取指定路径的完整文件内容。当需要查看完整代码时使用。")
     public String readFile(
             @P("文件路径，如: framework/src/main/java/com/bf/.../SysUser.java") String path) {
+        String limit = checkToolCall("readFile");
+        if (limit != null) return limit;
+
         log.info("Tool: readFile, path={}", path);
         return readFileTool.readFile(path);
     }
@@ -60,6 +90,9 @@ public class AgentTools {
     @Tool("查看指定项目的包结构和类列表。当需要了解项目整体结构时使用。")
     public String getProjectStructure(
             @P("项目名称，如: framework, app, editor_manager等") String projectName) {
+        String limit = checkToolCall("getProjectStructure");
+        if (limit != null) return limit;
+
         log.info("Tool: getProjectStructure, project={}", projectName);
         if (projectName == null || projectName.isEmpty()) {
             return projectStructureTool.getProjectRelations();
@@ -73,6 +106,9 @@ public class AgentTools {
     @Tool("查看指定类的所有字段列表。当用户问'XX类有哪些字段'时使用。")
     public String getClassFields(
             @P("类名，如: SysUser") String className) {
+        String limit = checkToolCall("getClassFields");
+        if (limit != null) return limit;
+
         log.info("Tool: getClassFields, className={}", className);
         // 先搜索类位置
         var results = retrievalService.search(className, 3, null, 0.5);
@@ -120,17 +156,24 @@ public class AgentTools {
     public String getCallers(
             @P("类名") String className,
             @P("方法名") String methodName) {
+        String limit = checkToolCall("getCallers");
+        if (limit != null) return limit;
+
         log.info("Tool: getCallers, className={}, methodName={}", className, methodName);
-        // 这里需要注入 CallRelationService
-        // 暂时返回提示
-        return "调用链查询功能: " + className + "." + methodName + "()\n" +
-                "(需要 CallRelationService 集成)";
+        return callRelationService.generateImpactReport(null, className, methodName, 3);
     }
 
-    @Tool("委托任务给子 Agent。当任务复杂、需要专门能力时使用。可用子 Agent：explore（代码探索）、verify（质量验证）")
+    /**
+     * 工具6: 委托子 Agent
+     */
+    @Tool("委托任务给子 Agent。当任务复杂、需要专门能力时使用。" +
+            "可用子 Agent：explore（代码探索）、verify（质量验证）、plan（任务规划）")
     public String delegateToSubAgent(
-            @P("子 Agent 名称：explore / verify") String agentName,
+            @P("子 Agent 名称：explore / verify / plan") String agentName,
             @P("任务描述，越具体越好") String task) {
+        String limit = checkToolCall("delegateToSubAgent");
+        if (limit != null) return limit;
+
         log.info("Tool: delegateToSubAgent, agentName={}, task={}", agentName, task);
         if (!subAgentScheduler.hasAgent(agentName)) {
             return "子 Agent 不存在: " + agentName;
