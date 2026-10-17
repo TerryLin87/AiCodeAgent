@@ -19,6 +19,7 @@ import dev.langchain4j.model.chat.response.ChatResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
 
@@ -34,6 +35,8 @@ import java.util.stream.Collectors;
  * 计划子 Agent —— Plan & Execute 里的 "Plan" 环节。
  */
 @Component
+//只有当配置文件里面配置的环境是code时才会加载该子agent
+@ConditionalOnProperty(name = "agent.domain.name", havingValue = "code", matchIfMissing = true)
 public class PlanSubAgent implements ISubAgent {
 
     private static final Logger log = LoggerFactory.getLogger(PlanSubAgent.class);
@@ -77,6 +80,16 @@ public class PlanSubAgent implements ISubAgent {
                 - 推荐每步使用的动作（检索/读文件/查调用关系等）
                 - 适合重构、新功能实现、多步骤分析类任务
                 """;
+    }
+
+    @Override
+    public String getDomain() {
+        return "code";
+    }
+
+    @Override
+    public List<String> getRoutingKeywords() {
+        return List.of("规划", "方案", "拆解", "分步", "怎么实现", "如何实现", "重构", "步骤");
     }
 
     @Override

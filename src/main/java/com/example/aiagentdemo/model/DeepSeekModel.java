@@ -32,7 +32,7 @@ public class DeepSeekModel implements ChatModel {
 
     private final String apiUrl;
     @Value("${deepseek.apikey}")
-    private String apiKey = "sk-cfcc142ef3bf404c9002a76ad26d0196";
+    private String apiKey = "";
     private final String modelName;
     private final boolean enableThinking;
     private final String reasoningEffort;

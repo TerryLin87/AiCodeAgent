@@ -1,6 +1,7 @@
 package com.example.aiagentdemo.service.subagent;
 
 import com.example.aiagentdemo.data.CallRelation;
+import com.example.aiagentdemo.data.RetrievalResult;
 import com.example.aiagentdemo.data.RetrievedCode;
 import com.example.aiagentdemo.data.subagent.SubAgentResult;
 import com.example.aiagentdemo.instances.subagent.ISubAgent;
@@ -10,6 +11,7 @@ import com.example.aiagentdemo.tools.ProjectStructureTool;
 import com.example.aiagentdemo.tools.ReadFileTool;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
@@ -27,6 +29,8 @@ import java.util.regex.Pattern;
  */
 @Slf4j
 @Component
+//只有当配置文件里面配置的环境是code时才会加载该子agent
+@ConditionalOnProperty(name = "agent.domain.name", havingValue = "code", matchIfMissing = true)
 public class ExploreSubAgent implements ISubAgent {
 
     @Autowired
@@ -96,6 +100,16 @@ public class ExploreSubAgent implements ISubAgent {
                 - 查看类的字段和方法签名
                 - 分析变更影响范围
                 """;
+    }
+
+    @Override
+    public String getDomain() {
+        return "code";
+    }
+
+    @Override
+    public List<String> getRoutingKeywords() {
+        return List.of("搜索", "查找", "读取", "查看", "结构", "目录", "调用", "依赖", "文件");
     }
 
     @Override
@@ -185,7 +199,7 @@ public class ExploreSubAgent implements ISubAgent {
     private String doSearch(TaskIntent intent) {
         String query = intent.getQuery();
         log.info("探索子agent搜索：{}", query);
-        List<RetrievedCode> results = retrievalService.hybridSearch(query, 10);
+        List<? extends RetrievalResult> results = retrievalService.hybridSearch(query, 10);
         if (CollectionUtils.isEmpty(results)) {
             return "未找到匹配的代码";
         }
@@ -348,19 +362,34 @@ public class ExploreSubAgent implements ISubAgent {
 
     //region 辅助工具
 
-    private String formatSearchResults(List<RetrievedCode> results) {
+    /**
+     * 格式化搜索结果。
+     * <b>通用版本</b>：不依赖具体领域的 key。
+     * 代码领域特有的 methodName/projectName 通过 getMetadata() 取，取不到就不显示。
+     */
+    private String formatSearchResults(List<? extends RetrievalResult> results) {
         StringBuilder sb = new StringBuilder();
         sb.append("搜索结果（共 ").append(results.size()).append(" 条）:\n");
         sb.append("=".repeat(50)).append("\n");
         for (int i = 0; i < Math.min(results.size(), 10); i++) {
-            RetrievedCode code = results.get(i);
-            sb.append(i + 1).append(". ").append(code.getClassName());
-            if (code.getMethodName() != null && !code.getMethodName().isEmpty()) {
-                sb.append(".").append(code.getMethodName()).append("()");
+            RetrievalResult r = results.get(i);
+            sb.append(i + 1).append(". ").append(r.getTitle() != null ? r.getTitle() : "");
+
+            // 代码领域特有：如果有 methodName，追加显示
+            String methodName = r.getMetadata("methodName");
+            if (methodName != null && !methodName.isEmpty()) {
+                sb.append(".").append(methodName).append("()");
             }
-            sb.append(" (相似度: ").append(String.format("%.2f", code.getSimilarity())).append(")\n");
-            sb.append("   项目: ").append(code.getProjectName()).append("\n");
-            String content = code.getContent();
+
+            sb.append(" (相似度: ").append(String.format("%.2f", r.getScore())).append(")\n");
+
+            // 代码领域特有：项目名
+            String projectName = r.getMetadata("projectName");
+            if (projectName != null && !projectName.isEmpty()) {
+                sb.append("   项目: ").append(projectName).append("\n");
+            }
+
+            String content = r.getContent();
             if (content != null && content.length() > 300) {
                 content = content.substring(0, 300) + "...";
             }

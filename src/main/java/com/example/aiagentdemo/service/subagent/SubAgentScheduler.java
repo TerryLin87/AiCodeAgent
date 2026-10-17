@@ -1,5 +1,6 @@
 package com.example.aiagentdemo.service.subagent;
 
+import com.example.aiagentdemo.config.DomainConfig;
 import com.example.aiagentdemo.data.subagent.SubAgentResult;
 import com.example.aiagentdemo.instances.subagent.ISubAgent;
 import jakarta.annotation.PostConstruct;
@@ -29,14 +30,25 @@ public class SubAgentScheduler {
     @Autowired
     private SubAgentRoutingService routingService;
 
+    @Autowired
+    private DomainConfig domainConfig;
+
     @PostConstruct
     public void init() {
+        String currentDomain = domainConfig.getName();
         for (ISubAgent agent : agentList) {
-            agents.put(agent.getName(), agent);
-            String firstLine = agent.getCapability().split("\n")[0];
-            log.info("注册子 Agent: {} - {}", agent.getName(), firstLine);
+            // 只注册"通用"或"匹配当前领域"的子 Agent
+            if (agent.getDomain() == null || agent.getDomain().equals(currentDomain)) {
+                agents.put(agent.getName(), agent);
+                String firstLine = agent.getCapability().split("\n")[0];
+                log.info("注册子 Agent: {} - {}", agent.getName(), firstLine);
+            } else {
+                log.debug("跳过子 Agent: {}（领域 {} 不匹配当前 {}）",
+                        agent.getName(), agent.getDomain(), currentDomain);
+            }
         }
-        log.info("共注册 {} 个子 Agent，顺序: {}", agents.size(), agents.keySet());
+        log.info("领域={}, 共注册 {} 个子 Agent: {}",
+                currentDomain, agents.size(), agents.keySet());
     }
 
     /**

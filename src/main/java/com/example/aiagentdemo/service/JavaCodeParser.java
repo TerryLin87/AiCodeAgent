@@ -5,6 +5,7 @@ import com.example.aiagentdemo.data.CallRelation;
 import com.example.aiagentdemo.data.CodeSegment;
 import com.example.aiagentdemo.data.FilePath;
 import com.example.aiagentdemo.data.ParseResult;
+import com.example.aiagentdemo.instances.IDocumentParser;
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
@@ -23,6 +24,7 @@ import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -31,7 +33,8 @@ import java.util.stream.Collectors;
 
 @Slf4j
 @Component
-public class JavaCodeParser {
+@ConditionalOnProperty(name = "agent.domain.name", havingValue = "code", matchIfMissing = true)
+public class JavaCodeParser implements IDocumentParser {
     private JavaParser javaParser;
 
     @Autowired
@@ -111,10 +114,26 @@ public class JavaCodeParser {
     // 解析入口
     // ================================================================
 
+    @Override
+    public String getDomain() {
+        return "code";
+    }
+
+    @Override
+    public List<String> getSupportedExtensions() {
+        return List.of(".java");
+    }
+
+    @Override
+    public ParseResult parse(FilePath filePath, String content) {
+        // 直接复用 parseWithRelations（返回 ParseResult）
+        return parseWithRelations(filePath, content);
+    }
+
     /**
      * 解析 Java 文件，提取多个代码片段（兼容原有调用方）
      */
-    public List<CodeSegment> parse(FilePath filePath, String content) {
+    public List<CodeSegment> parseSegments(FilePath filePath, String content) {
         List<CodeSegment> segments = new ArrayList<>();
         try {
             CompilationUnit cu = javaParser.parse(content).getResult()

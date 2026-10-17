@@ -6,13 +6,17 @@ import com.example.aiagentdemo.instances.subagent.ISubAgent;
 import com.example.aiagentdemo.service.SelfEvaluationService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import java.util.List;
 import java.util.Map;
 
 @Slf4j
 @Component
+//只有当配置文件里面配置的环境是code时才会加载该子agent
+@ConditionalOnProperty(name = "agent.domain.name", havingValue = "code", matchIfMissing = true)
 public class VerifySubAgent implements ISubAgent {
 
     @Autowired
@@ -32,6 +36,16 @@ public class VerifySubAgent implements ISubAgent {
                 - 评估代码质量
                 - 检查是否存在潜在问题
                 """;
+    }
+
+    @Override
+    public String getDomain() {
+        return "code";
+    }
+
+    @Override
+    public List<String> getRoutingKeywords() {
+        return List.of("验证", "检查", "评审", "review", "质量", "bug", "问题");
     }
 
     @Override

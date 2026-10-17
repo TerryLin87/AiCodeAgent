@@ -1,5 +1,6 @@
 package com.example.aiagentdemo.tools;
 
+import com.example.aiagentdemo.data.RetrievalResult;
 import com.example.aiagentdemo.data.subagent.SubAgentResult;
 import com.example.aiagentdemo.service.CallRelationService;
 import com.example.aiagentdemo.service.CodeRetrievalService;
@@ -11,6 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -110,18 +112,17 @@ public class AgentTools {
         if (limit != null) return limit;
 
         log.info("Tool: getClassFields, className={}", className);
-        // 先搜索类位置
-        var results = retrievalService.search(className, 3, null, 0.5);
+        List<? extends RetrievalResult> results = retrievalService.search(className, 3, null, 0.5);
         if (results.isEmpty()) {
             return "未找到类: " + className;
         }
 
         // 找到匹配的类
-        for (var code : results) {
-            if (code.getClassName().equals(className) ||
-                    code.getClassName().toLowerCase().contains(className.toLowerCase())) {
-                // 提取字段信息
-                String content = code.getContent();
+        for (RetrievalResult r : results) {
+            String title = r.getTitle();
+            if (title != null && (title.equals(className)
+                    || title.toLowerCase().contains(className.toLowerCase()))) {
+                String content = r.getContent();
                 StringBuilder sb = new StringBuilder();
                 sb.append("📋 类 ").append(className).append(" 的字段:\n");
                 sb.append("=".repeat(50)).append("\n");

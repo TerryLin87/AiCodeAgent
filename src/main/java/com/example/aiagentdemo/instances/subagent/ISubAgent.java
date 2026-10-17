@@ -2,6 +2,7 @@ package com.example.aiagentdemo.instances.subagent;
 
 import com.example.aiagentdemo.data.subagent.SubAgentResult;
 
+import java.util.List;
 import java.util.Map;
 
 public interface ISubAgent {
@@ -28,5 +29,23 @@ public interface ISubAgent {
      */
     default boolean canHandle(String task) {
         return true;  // 默认都可以，子类可重写
+    }
+
+    /**
+     * 适用领域。
+     * <b>null 表示全领域通用</b>（如任务规划器可能跨领域）。
+     * 非 null 时，只在 agent.domain.name 匹配时注册。
+     */
+    default String getDomain() {
+        return null;
+    }
+
+    /**
+     * 路由关键词。
+     * 路由器用这些词做关键词兜底匹配。
+     * 空列表表示该子 Agent 不参与关键词路由（只能靠 LLM 路由选中）。
+     */
+    default List<String> getRoutingKeywords() {
+        return List.of();
     }
 }

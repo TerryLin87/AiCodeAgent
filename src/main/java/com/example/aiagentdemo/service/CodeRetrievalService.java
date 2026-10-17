@@ -1,5 +1,6 @@
 package com.example.aiagentdemo.service;
 
+import com.example.aiagentdemo.data.RetrievalResult;
 import com.example.aiagentdemo.data.RetrievedCode;
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
@@ -24,6 +25,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -157,54 +159,57 @@ public class CodeRetrievalService {
 
     /**
      * 格式化检索结果为 Prompt 上下文。
+     * <b>通用版本</b>：不依赖具体领域的 key，用 getAllMetadata() 遍历。
      */
-    public String formatAsPromptContext(List<RetrievedCode> results) {
+    public String formatAsPromptContext(List<? extends RetrievalResult> results) {
         if (results == null || results.isEmpty()) {
-            return "（未找到相似代码参考）";
+            return "（未找到相似内容参考）";
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("以下是项目中相似的代码示例，请参考其风格和规范：\n\n");
+        sb.append("以下是项目中相似的示例，请参考其风格和规范：\n\n");
 
         for (int i = 0; i < results.size(); i++) {
-            RetrievedCode code = results.get(i);
-            String content = code.getContent();
+            RetrievalResult r = results.get(i);
+            String content = r.getContent();
             if (content == null) {
                 content = "";
             }
             if (content.length() > 2000) {
-                content = content.substring(0, 2000) + "\n... (代码过长已截断)";
+                content = content.substring(0, 2000) + "\n... (内容过长已截断)";
             }
 
             sb.append("【参考 ").append(i + 1).append("】\n");
-            sb.append("项目: ").append(code.getProjectName()).append("\n");
-            sb.append("类型: ").append(code.getSegmentType() != null ? code.getSegmentType() : "class").append("\n");
-            sb.append("类名: ").append(code.getClassName()).append("\n");
-            if (code.getMethodName() != null) {
-                sb.append("方法: ").append(code.getMethodName()).append("\n");
+            sb.append("来源: ").append(r.getSource() != null ? r.getSource() : "").append("\n");
+            sb.append("类型: ").append(r.getCategory() != null ? r.getCategory() : "unknown").append("\n");
+            sb.append("标题: ").append(r.getTitle() != null ? r.getTitle() : "").append("\n");
+
+            // 附加元数据全部展示，不预设 key
+            Map<String, String> meta = r.getAllMetadata();
+            if (!meta.isEmpty()) {
+                meta.forEach((k, v) -> sb.append("  ").append(k).append(": ").append(v).append("\n"));
             }
-            sb.append("相似度: ").append(String.format("%.2f", code.getSimilarity())).append("\n");
-            sb.append("```java\n");
-            sb.append(content).append("\n");
-            sb.append("```\n\n");
+
+            sb.append("相似度: ").append(String.format("%.2f", r.getScore())).append("\n");
+            sb.append("```\n").append(content).append("\n```\n\n");
         }
 
         return sb.toString();
     }
 
     /**
-     * 精简格式化（只保留代码，用于节省 token）。
+     * 精简格式化（只保留内容，用于节省 token）。
      */
-    public String formatAsCompactContext(List<RetrievedCode> results) {
+    public String formatAsCompactContext(List<? extends RetrievalResult> results) {
         if (results == null || results.isEmpty()) {
             return "";
         }
 
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < Math.min(results.size(), 3); i++) {
-            RetrievedCode code = results.get(i);
+            RetrievalResult r = results.get(i);
             sb.append("参考 ").append(i + 1).append(":\n");
-            sb.append(code.getContent()).append("\n\n");
+            sb.append(r.getContent()).append("\n\n");
         }
 
         return sb.toString();

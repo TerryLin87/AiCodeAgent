@@ -1,13 +1,14 @@
 package com.example.aiagentdemo.service;
 
+import com.example.aiagentdemo.config.DomainConfig;
 import com.example.aiagentdemo.data.AgentSession;
 import com.example.aiagentdemo.data.EvaluationResult;
 import com.example.aiagentdemo.data.MemoryDocument;
 import com.example.aiagentdemo.enums.AgentStatus;
+import com.example.aiagentdemo.instances.IToolPlugin;
 import com.example.aiagentdemo.model.DeepSeekModel;
 import com.example.aiagentdemo.service.subagent.ContextCompressor;
 import com.example.aiagentdemo.service.subagent.PlanSubAgent;
-import com.example.aiagentdemo.tools.AgentTools;
 import com.example.aiagentdemo.tools.ToolCallGuard;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
@@ -78,42 +79,6 @@ public class CodeAgentLoopService {
     /** 记忆缓存硬上限，超过则触发一次空闲回收 */
     private static final int MAX_CACHED_MEMORIES = 1000;
 
-    private static final String BASE_SYSTEM_PROMPT = """
-            你是一个智能的 Java 代码助手，可以调用工具完成代码检索、分析和验证任务。
-
-            ================================================================
-            你的能力：
-            1. 调用工具直接完成简单任务（搜索代码、读文件、查调用关系）
-            2. 委托子 Agent 完成复杂任务（任务规划、深度探索、影响分析、质量验证）
-            ================================================================
-
-            可用工具：
-            - searchCode(query)                     搜索代码
-            - readFile(path)                        读取文件
-            - getProjectStructure(projectName)      查看项目结构
-            - getClassFields(className)             查看类字段
-            - getCallers(className, methodName)     查询调用者
-            - delegateToSubAgent(agentName, task)   委托子 Agent
-
-            可用的子 Agent（能力与使用场景）：
-            - explore: 代码探索专家（搜索、读文件、看结构、分析调用）——简单查询、定位代码时使用
-            - verify:  验证专家（检查代码质量、验证正确性、代码评审）
-            - plan:    任务规划专家（拆解复杂任务、给出执行方案、重构/实现的分步计划）
-                      ——任务复杂、多步骤、需要方案时优先使用 plan，再按计划逐步执行
-
-            ================================================================
-            工作原则：
-            1. 先判断任务复杂度：
-               - 简单查询（"找 XX 类"、"XX 有哪些方法"）→ 直接调工具或 delegate explore
-               - 验证/评审/检查问题 → delegate verify
-               - 复杂任务（"实现某功能"、"重构某模块"、"分析整个流程"、"为什么出问题"）→
-                 先 delegate plan 拿到执行计划，再按计划逐步 delegate 其他子 Agent
-            2. 调用工具/子 Agent 后，根据返回结果决定下一步
-            3. 收集到足够信息后，给出最终答案
-            4. 不要编造代码信息，一切以工具返回为准
-            ================================================================
-            """;
-
     // ================================================================
     // 依赖注入
     // ================================================================
@@ -124,9 +89,6 @@ public class CodeAgentLoopService {
 
     @Autowired
     private LongTermMemoryService longTermMemoryService;
-
-    @Autowired
-    private AgentTools agentTools;
 
     @Autowired
     private ContextCompressor contextCompressor;
@@ -149,6 +111,12 @@ public class CodeAgentLoopService {
     /** 工具调用守卫（抽离出的计数职责，避免与 AgentTools 循环依赖） */
     @Autowired
     private ToolCallGuard toolCallGuard;
+
+    @Autowired
+    private List<IToolPlugin> toolPlugins;
+
+    @Autowired
+    private DomainConfig domainConfig;
 
     // ================================================================
     // 配置项
@@ -181,13 +149,29 @@ public class CodeAgentLoopService {
 
     @PostConstruct
     public void init() {
+        // 按当前领域筛选工具
+        List<Object> activeTools = toolPlugins.stream()
+                .filter(p -> p.getDomainName().equals(domainConfig.getName()))
+                .flatMap(p -> p.getToolBeans().stream())
+                .toList();
+
+        if (activeTools.isEmpty()) {
+            throw new IllegalStateException(
+                    "领域 " + domainConfig.getName() + " 没有注册任何工具，请检查 ToolPlugin 实现");
+        }
+
         this.assistant = AiServices.builder(CodingAssistant.class)
                 .chatModel(deepSeekModel)
                 .chatMemoryProvider(memoryId -> memoryOf((String) memoryId))
                 .systemMessageProvider(memoryId -> buildSystemPrompt((String) memoryId))
-                .tools(agentTools)
+                .tools(activeTools.toArray())
                 .build();
-        log.info("CodingAssistant 初始化完成（单实例 + 动态记忆/系统提示）");
+        log.info("CodingAssistant 初始化完成，领域={}, 工具数={}, 工具=[{}]",
+                domainConfig.getName(),
+                activeTools.size(),
+                activeTools.stream()
+                        .map(t -> t.getClass().getSimpleName())
+                        .collect(java.util.stream.Collectors.joining(", ")));
     }
 
     // ================================================================
@@ -448,7 +432,13 @@ public class CodeAgentLoopService {
      * 构建系统提示词：基础提示 + 本轮计划 + 长期记忆（放在 System 侧，不污染用户消息）。
      */
     private String buildSystemPrompt(String sessionId) {
-        StringBuilder sb = new StringBuilder(BASE_SYSTEM_PROMPT);
+        // 基础 Prompt 从 DomainConfig 加载（换领域只改 YAML）
+        String basePrompt = domainConfig.getSystemPrompt();
+        if (basePrompt == null || basePrompt.isBlank()) {
+            basePrompt = "你是一个智能助手。";
+        }
+
+        StringBuilder sb = new StringBuilder(basePrompt);
 
         String planContext = pendingPlanContext.get(sessionId);
         if (planContext != null && !planContext.isEmpty()) {

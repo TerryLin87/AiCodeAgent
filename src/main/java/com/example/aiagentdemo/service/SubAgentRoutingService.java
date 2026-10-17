@@ -6,7 +6,6 @@ import com.example.aiagentdemo.model.DeepSeekModel;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -27,24 +26,6 @@ import java.util.stream.Collectors;
  *
  * <p>取代原来 SubAgentScheduler.delegateAuto() 里的 HashMap 遍历 + 关键词 contains 匹配，
  * 采用"能力声明 + LLM 结构化输出 + 确定性兜底"三级路由：
- * <ol>
- *   <li><b>LLM 路由（首选）</b>：把所有子 Agent 的能力描述拼成 Prompt，让 LLM 输出
- *       JSON {@code {"agent":"name","task":"子任务描述","reason":"选型理由"}}，
- *       结构化结果既做路由、也做"任务重写"（主任务被拆解为更聚焦的子任务）。</li>
- *   <li><b>关键词加权兜底</b>：LLM 不可用/返回非法 JSON/选了不存在的 Agent 时，
- *       用加权关键词匹配——强信号词（如"验证/检查正确"）直接命中对应 Agent，
- *       避免原来 explore 因"代码"等高频词一家独大。</li>
- *   <li><b>最终默认</b>：兜底后仍未命中则走 explore（保持原行为，防止 404）。</li>
- * </ol>
- *
- * <p><b>设计意图（面试要点）</b>：
- * <ul>
- *   <li>路由逻辑<b>显式可审计</b>：LLM 必须给 reason，兜底路径有日志，不会再出现"关键词顺序决定路由"的不确定行为；</li>
- *   <li>新增子 Agent 时<b>零改动</b>：只要实现 ISubAgent 并注册为 Spring Bean，路由器自动把它的 capability 加入 Prompt；</li>
- *   <li><b>任务重写</b>：LLM 路由时会把主任务改写成"对应子 Agent 最适合处理的子任务"，
- *       例如"分析下订单模块重试逻辑是否有问题"被路由到 verify 时、task 会被改写成
- *       "重点检查重试逻辑：异常覆盖、幂等性、退避策略、资源泄漏"，显著提升子 Agent 的执行质量。</li>
- * </ul>
  */
 @Slf4j
 @Service
@@ -64,55 +45,24 @@ public class SubAgentRoutingService {
 
     /** LLM 输出的缓存（不需要每次都重建） */
     private String routingPrompt;
+    /** 强信号关键词 → 对应的 agent 名（从各子 Agent 动态收集） */
+    private final Map<String, String> strongKeywords = new LinkedHashMap<>();
     private Map<String, ISubAgent> agentIndex;
-
-    /** 强信号关键词 → 对应的 agent 名（权重高于弱信号词） */
-    private static final Map<String, String> STRONG_KEYWORDS = new LinkedHashMap<>();
-
-    /** 弱信号关键词（原 explore 的那批词，作为最后兜底） */
-    private static final Set<String> WEAK_EXPLORE_WORDS = new HashSet<>(Arrays.asList(
-            "搜索", "查找", "找一下", "读取", "查看", "结构", "目录", "调用", "依赖", "文件"
-    ));
-
-    static {
-        // 强信号：verify
-        STRONG_KEYWORDS.put("验证", "verify");
-        STRONG_KEYWORDS.put("检查是否正确", "verify");
-        STRONG_KEYWORDS.put("检查代码", "verify");
-        STRONG_KEYWORDS.put("有没有问题", "verify");
-        STRONG_KEYWORDS.put("有没有bug", "verify");
-        STRONG_KEYWORDS.put("是否有bug", "verify");
-        STRONG_KEYWORDS.put("质量评估", "verify");
-        STRONG_KEYWORDS.put("评审", "verify");
-        STRONG_KEYWORDS.put("code review", "verify");
-        STRONG_KEYWORDS.put("review", "verify");
-
-        // 强信号：plan
-        STRONG_KEYWORDS.put("规划", "plan");
-        STRONG_KEYWORDS.put("制定计划", "plan");
-        STRONG_KEYWORDS.put("拆解任务", "plan");
-        STRONG_KEYWORDS.put("分步", "plan");
-        STRONG_KEYWORDS.put("方案", "plan");
-        STRONG_KEYWORDS.put("怎么实现", "plan");
-        STRONG_KEYWORDS.put("如何改", "plan");
-        STRONG_KEYWORDS.put("重构", "plan");
-        STRONG_KEYWORDS.put("分析并给出", "plan");
-        STRONG_KEYWORDS.put("完整方案", "plan");
-
-        // 强信号：write（后续会加，先预留路由位；未注册时会自然回退到 explore）
-//        STRONG_KEYWORDS.put("写代码", "write");
-//        STRONG_KEYWORDS.put("实现", "write");
-//        STRONG_KEYWORDS.put("补全", "write");
-//        STRONG_KEYWORDS.put("修改代码", "write");
-//        STRONG_KEYWORDS.put("生成代码", "write");
-    }
 
     @PostConstruct
     public void init() {
         agentIndex = allAgents.stream()
                 .collect(Collectors.toMap(ISubAgent::getName, a -> a, (a, b) -> a, LinkedHashMap::new));
+        //从各子 Agent 动态收集路由关键词
+        for (ISubAgent agent : allAgents) {
+            for (String keyword : agent.getRoutingKeywords()) {
+                strongKeywords.put(keyword, agent.getName());
+            }
+        }
+
         routingPrompt = buildRoutingPrompt();
-        log.info("SubAgentRoutingService 初始化完成，注册 Agent: {}", agentIndex.keySet());
+        log.info("SubAgentRoutingService 初始化完成，注册 Agent: {}，路由关键词数: {}",
+                agentIndex.keySet(), strongKeywords.size());
     }
 
     /**
@@ -239,25 +189,28 @@ public class SubAgentRoutingService {
     private RouteDecision routeByKeywords(String task) {
         String lower = task.toLowerCase(Locale.ROOT);
 
-        // 1. 先扫强信号词（顺序即优先级，verify/plan 优先于 explore/write）
-        for (Map.Entry<String, String> e : STRONG_KEYWORDS.entrySet()) {
+        // 1. 先扫强信号词（从子 Agent 动态收集）
+        for (Map.Entry<String, String> e : strongKeywords.entrySet()) {
             if (lower.contains(e.getKey().toLowerCase(Locale.ROOT))) {
-                // 若该 agent 未注册（例如 write 尚未实现），继续往下找
                 if (agentIndex.containsKey(e.getValue())) {
-                    return new RouteDecision(e.getValue(), task, "关键词强命中: " + e.getKey(), false);
+                    return new RouteDecision(e.getValue(), task, "关键词命中: " + e.getKey(), false);
                 }
             }
         }
 
-        // 2. 再扫弱信号词 → explore
-        for (String w : WEAK_EXPLORE_WORDS) {
-            if (lower.contains(w)) {
-                return new RouteDecision("explore", task, "关键词弱命中: " + w, false);
-            }
+        // 2. 默认兜底：explore（如果有）
+        if (agentIndex.containsKey("explore")) {
+            return new RouteDecision("explore", task, "默认路由", false);
         }
 
-        // 3. 默认
-        return new RouteDecision("explore", task, "默认路由", false);
+        // 3. 连 explore 都没有，取第一个注册的
+        if (!agentIndex.isEmpty()) {
+            String first = agentIndex.keySet().iterator().next();
+            return new RouteDecision(first, task, "无匹配，取第一个", false);
+        }
+
+        // 4. 一个都没有（异常情况）
+        return new RouteDecision("", task, "无可用子 Agent", false);
     }
 
     /**
