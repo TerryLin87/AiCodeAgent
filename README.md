@@ -3,6 +3,8 @@
 一个基于 **Ollama + Spring Boot + LangChain4j + Milvus** 的智能 Java 代码助手 Agent。
 支持代码语义检索、调用关系分析、多级记忆管理、子 Agent 协作、反思闭环与自我修正。
 
+**架构特点**：领域无关的 Agent 引擎 + 领域插件，支持按领域切换，引擎层零改动。
+
 ![Java](https://img.shields.io/badge/Java-17+-blue.svg)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.0.6-brightgreen.svg)
 ![LangChain4j](https://img.shields.io/badge/LangChain4j-1.17.2-orange.svg)
@@ -20,57 +22,105 @@
 - 🔗 **跨项目调用分析**：AST 级别解析 Java 代码，构建方法级调用图，支持变更影响递归追踪
 - 🔄 **反思闭环**：LLM 输出后自动评估，未达标触发自动修正（最多 3 轮），带时间上限
 - 🛑 **终止条件**：单会话工具调用次数上限，防止 Agent 死循环
-- 🛠️ **自定义工具注解**：`@AgentTool` / `@ToolParam` 声明式注册，支持超时、只读、二次确认
+- 🏗️ **领域无关架构**：Agent 引擎 + 领域插件，支持按领域切换，引擎层零改动
 - 🚦 **多级降级**：限流降级、压缩降级、路由降级、反思降级，每层都有 fallback
 
 ---
 
 ## 🏗️ 系统架构
 
+### 分层架构
+
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                        用户请求 (HTTP)                          │
-└────────────────────────────────┬────────────────────────────────┘
-                                 │
-                    ┌────────────▼────────────┐
-                    │  CodeAgentLoopService   │  ← 主循环
-                    │  · 全局限流 (10)         │
-                    │  · 会话级限流 (1)        │
-                    └────────────┬────────────┘
-                                 │
-        ┌────────────────────────┼────────────────────────┐
-        │                        │                        │
-   ┌────▼────┐            ┌──────▼──────┐          ┌──────▼──────┐
-   │ 记忆管理 │            │ 上下文压缩  │          │ 子 Agent    │
-   │         │            │             │          │  路由       │
-   │ ·短期    │            │ ·L1 剪枝    │          │ ·LLM 首选   │
-   │ ·长期    │            │ ·L2 合并    │          │ ·关键词兜底 │
-   │ ·工作    │            │ ·L3 摘要    │          │ ·默认 explore│
-   └────┬────┘            │ ·L4 实体    │          └──────┬──────┘
-        │                 │ ·L5 截断    │                 │
-        │                 └─────────────┘                 │
-        │                                                 │
-   ┌────▼─────────────────────────┐         ┌─────────────▼────────────┐
-   │   Milvus (chat_memory)       │         │  explore │ verify │ plan │
-   │   · 语义去重                  │         │  (代码)  │(质量)  │(规划) │
-   │   · 跨会话召回                │         └──────────┬───────────────┘
-   └──────────────────────────────┘                    │
-                                                       │
-   ┌───────────────────────────────────────────────────▼──────────────┐
-   │                       工具与检索层                               │
-   │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
-   │  │ 混合检索     │  │ 调用关系     │  │ 代码解析     │           │
-   │  │ ·语义(Milvus)│  │ ·JavaParser  │  │ ·AST 抽取    │           │
-   │  │ ·BM25(Lucene)│  │ ·跨项目图    │  │ ·类/方法片段 │           │
-   │  └──────────────┘  └──────────────┘  └──────────────┘           │
-   └─────────────────────────────────────────────────────────────────┘
-
-        反思闭环（doExecute 内部）：
-          输出 → 评估 → [未达标? 修正 → 再评估] → 返回
-
-        终止条件（ToolCallGuard）：
-          每次工具调用 → 计数+1 → [超上限? 拒绝调用]
+┌─────────────────────────────────────────────────────────┐
+│              接口层（TestController）                    │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│              引擎层（领域无关，可复用）                   │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │ CodeAgentLoopService（主循环）                    │   │
+│  │  · 双层限流 · 会话管理 · 记忆装配 · 反思闭环      │   │
+│  └─────────────────────────────────────────────────┘   │
+│  ┌────────────┐ ┌────────────┐ ┌────────────┐          │
+│  │ 上下文压缩  │ │ 子 Agent   │ │ 工具调用    │          │
+│  │ (5级降级)  │ │ 路由(3级)  │ │ 守卫        │          │
+│  └────────────┘ └────────────┘ └────────────┘          │
+│  ┌────────────┐ ┌────────────┐ ┌────────────┐          │
+│  │ 长期记忆    │ │ 自我评估    │ │ 自动修正    │          │
+│  └────────────┘ └────────────┘ └────────────┘          │
+└────────────────────────┬────────────────────────────────┘
+                         │ 接口注入
+┌────────────────────────▼────────────────────────────────┐
+│              领域插件层（可替换）                         │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ 当前：代码领域                                     │  │
+│  │  · RetrievedCode / JavaCodeParser                │  │
+│  │  · AgentTools / Explore/Verify/PlanSubAgent      │  │
+│  └──────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ 可扩展：其他领域                                   │  │
+│  │  · 实现同一套接口，按配置切换                       │  │
+│  └──────────────────────────────────────────────────┘  │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│              存储层                                      │
+│  Milvus（代码向量 + 长期记忆） · Lucene（关键词索引）     │
+│  codeCache（原文内存缓存）                               │
+└─────────────────────────────────────────────────────────┘
 ```
+
+### 主执行流程
+
+```text
+用户请求
+    │
+    ▼
+① 双层限流（全局 10 / 会话 1）
+    │
+    ▼
+② 会话与记忆准备（ChatMemory 按 sessionId 缓存）
+    │
+    ▼
+③ 上下文压缩（五级降级：L1剪枝→L2合并→L3摘要→L4实体→L5截断）
+    │
+    ▼
+④ 复杂任务规划（isComplexTask 判定 → PlanSubAgent）
+    │
+    ▼
+⑤ 长期记忆召回（Milvus chat_memory，注入 System Prompt）
+    │
+    ▼
+⑥ 调用 LLM Agent（AiServices 单实例 + 动态 System Prompt）
+    │
+    ├── 直接回答
+    ├── 调工具（searchCode/readFile/getCallers...）
+    └── 委托子 Agent（explore/verify/plan）
+    │
+    ▼
+⑦ 反思闭环（评估 → 未达标 → 自动修正）
+    │
+    ▼
+⑧ 写回记忆 + 审计 + 返回
+```
+
+### 领域切换能力
+
+引擎层通过 **5 个抽象接口** 与领域解耦：
+
+| 抽象接口 | 作用 |
+|---------|------|
+| `DomainConfig` | System Prompt / 领域标识配置化 |
+| `RetrievalResult` | 通用检索结果接口，领域数据类实现它 |
+| `DocumentParser` | 文档解析器插件，按领域和扩展名动态选择 |
+| `ToolPlugin` | 工具集插件，按领域动态装配 |
+| `ISubAgent.getDomain()` | 子 Agent 声明适用领域，调度器按领域过滤 |
+
+**切换领域只需**：
+1. 新增领域插件包（实现上述接口）
+2. 修改 `application.yml` 中的 `agent.domain.name`
+3. 引擎层零改动
 
 ---
 
@@ -89,10 +139,7 @@
 ### 1. 准备 Ollama 模型
 
 ```bash
-# 拉取 Embedding 模型
 ollama pull qwen3-embedding:0.6b
-
-# 启动 Ollama 服务
 ollama serve
 ```
 
@@ -106,11 +153,11 @@ docker run -d --name milvus-standalone \
   milvusdb/milvus:latest standalone
 ```
 
-或使用 [Zilliz Cloud](https://cloud.zilliz.com/) 免费实例，记录 `uri` 和 `token`。
+或使用 [Zilliz Cloud](https://cloud.zilliz.com/) 免费实例。
 
 ### 3. 配置应用
 
-复制配置模板并填写你的密钥：
+复制配置模板：
 
 ```bash
 cp src/main/resources/application.example.yml src/main/resources/application.yml
@@ -119,13 +166,27 @@ cp src/main/resources/application.example.yml src/main/resources/application.yml
 编辑 `application.yml`：
 
 ```yaml
-# ===== 代码库路径 =====
+spring:
+  application:
+    name: AiAgentDemo
+
+server:
+  port: 8001
+
+deepseek:
+  apikey: ${DEEPSEEK_API_KEY}
+
 codebase:
   sub-projects-path: /path/to/your/projects
   exclude-dirs: [target, .git, .idea, node_modules]
 
-# ===== Milvus 向量库 =====
 agent:
+  domain:
+    name: code
+    display-name: Java 代码助手
+    system-prompt: |
+      你是一个智能的 Java 代码助手...
+
   milvus:
     uri: ${MILVUS_URI}
     token: ${MILVUS_TOKEN}
@@ -133,7 +194,7 @@ agent:
     max-top-k: 16384
   embedding:
     dimension: 1024
-  # ===== 上下文压缩 =====
+
   context:
     max-messages: 20
     max-tokens: 8000
@@ -141,26 +202,20 @@ agent:
     enable-summary: true
   memory:
     dedupe-threshold: 0.85
-  # ===== 反思闭环 =====
+
   reflexion:
     enabled: true
     score-threshold: 7.0
     max-duration-ms: 30000
-  # ===== 工具调用上限 =====
+
   tool:
     max-calls-per-session: 15
 
-# ===== DeepSeek API =====
-deepseek:
-  apikey: ${DEEPSEEK_API_KEY}
-
-# ===== 混合检索权重 =====
 search:
   hybrid:
     semantic-weight: 0.6
     keyword-weight: 0.4
 
-# ===== 文件读取沙箱 =====
 project:
   base-path: /path/to/your/projects
 ```
@@ -170,19 +225,11 @@ project:
 ### 4. 启动应用
 
 ```bash
-# 编译
 ./mvnw clean package -DskipTests
-
-# 设置环境变量
-$env:DEEPSEEK_API_KEY="sk-你的key"
-$env:MILVUS_URI="https://..."
-$env:MILVUS_TOKEN="..."
-
-# 启动
 java -jar target/ai-agent-demo-*.jar
 ```
 
-启动后访问 `http://localhost:8080/test/health` 检查状态。
+启动后访问 `http://localhost:8001/test/health` 检查状态。
 
 ---
 
@@ -191,32 +238,29 @@ java -jar target/ai-agent-demo-*.jar
 ### 基础对话
 
 ```bash
-curl -X POST http://localhost:8080/test/chat \
+curl -X POST http://localhost:8001/test/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "帮我搜索用户登录相关的代码"}'
 ```
 
-### 多轮会话（带 sessionId）
+### 多轮会话
 
 ```bash
-curl -X POST http://localhost:8080/test/chat/session \
+curl -X POST http://localhost:8001/test/chat/session \
   -H "Content-Type: application/json" \
-  -d '{
-    "sessionId": "session-abc123",
-    "message": "继续分析这个类的调用链"
-  }'
+  -d '{"sessionId": "session-abc123", "message": "继续分析"}'
 ```
 
 ### 代码检索
 
 ```bash
 # 语义检索
-curl -X POST http://localhost:8080/test/retrieval/semantic \
+curl -X POST http://localhost:8001/test/retrieval/semantic \
   -H "Content-Type: application/json" \
   -d '{"query": "用户登录", "maxResults": 5}'
 
 # 混合检索（语义 + BM25）
-curl -X POST http://localhost:8080/test/retrieval/hybrid \
+curl -X POST http://localhost:8001/test/retrieval/hybrid \
   -H "Content-Type: application/json" \
   -d '{"query": "Schema 数据库迁移", "maxResults": 5}'
 ```
@@ -224,21 +268,21 @@ curl -X POST http://localhost:8080/test/retrieval/hybrid \
 ### 调用关系分析
 
 ```bash
-# 查询谁调用了某个方法
-curl "http://localhost:8080/test/call/callers?className=StorageService&methodName=deleteReferencesByFile"
+# 查询谁调用了某方法
+curl "http://localhost:8001/test/call/callers?className=StorageService&methodName=deleteReferencesByFile"
 
-# 分析变更影响范围
-curl "http://localhost:8080/test/call/impact?className=StorageService&methodName=deleteReferencesByFile&depth=3"
+# 分析影响范围
+curl "http://localhost:8001/test/call/impact?className=StorageService&methodName=deleteReferencesByFile&depth=3"
 ```
 
 ### 子 Agent 委托
 
 ```bash
 # 列出所有子 Agent
-curl http://localhost:8080/test/subagent/list
+curl http://localhost:8001/test/subagent/list
 
-# 显式委托给 plan
-curl -X POST http://localhost:8080/test/subagent/delegate \
+# 显式委托
+curl -X POST http://localhost:8001/test/subagent/delegate \
   -H "Content-Type: application/json" \
   -d '{"agentName": "plan", "task": "分析存储层设计，给出扩展方案"}'
 ```
@@ -246,11 +290,11 @@ curl -X POST http://localhost:8080/test/subagent/delegate \
 ### 自我评估
 
 ```bash
-curl -X POST http://localhost:8080/test/evaluate \
+curl -X POST http://localhost:8001/test/evaluate \
   -H "Content-Type: application/json" \
   -d '{
     "content": "public class A { public int div(int a, int b) { return a / b; } }",
-    "context": "实现一个安全的除法方法，需要处理除零"
+    "context": "实现安全的除法方法"
   }'
 ```
 
@@ -258,36 +302,29 @@ curl -X POST http://localhost:8080/test/evaluate \
 
 ## 🧩 核心模块说明
 
-### 模块一览
-
-| 包路径 | 职责 |
-|--------|------|
-| `config` | Spring 配置（Milvus、Ollama、ChatMemory 等） |
-| `controller` | REST 入口（`TestController`） |
-| `service` | 核心业务：主循环、检索、记忆、评估、修正、工具守卫 |
-| `service.subagent` | 子 Agent 实现（explore / verify / plan）及路由 |
-| `tools` | LangChain4j 工具（`AgentTools` / `ProjectStructureTool` 等） |
-| `instances` | 注解与接口定义（`@AgentTool`、`ISubAgent`） |
-| `model` | 自定义模型（`DeepSeekModel` 实现 ChatModel 接口） |
-| `data` | DTO / 实体类 |
-
-### 关键类说明
+### 引擎层（领域无关）
 
 | 类 | 作用 | 亮点 |
 |----|------|------|
-| `CodeAgentLoopService` | Agent 主循环 | 双层限流、会话级记忆缓存、反思闭环、终止条件 |
+| `CodeAgentLoopService` | Agent 主循环 | 双层限流、会话记忆缓存、反思闭环、终止条件 |
 | `ContextCompressor` | 上下文压缩 | 五级降级，按角色合并，CJK 感知 token 估算 |
 | `SubAgentRoutingService` | 子 Agent 路由 | LLM 结构化路由 + 关键词兜底，可审计 |
-| `PlanSubAgent` | 任务规划 | LangChain4j 原生 `ResponseFormat` + JSON Schema |
-| `ExploreSubAgent` | 代码探索 | 意图识别 + 混合检索 + 调用关系查询 |
-| `VerifySubAgent` | 质量验证 | 调 `SelfEvaluationService` 打分 |
-| `HybridSearchService` | 混合检索 | RRF 融合语义与关键词结果 |
-| `JavaCodeParser` | 代码解析 | AST 提取类/方法 + 调用关系，import 上下文推断 |
-| `CallRelationService` | 调用关系 | 读写锁，跨项目影响分析 |
+| `ToolCallGuard` | 工具调用守卫 | 按会话计数，防死循环；独立组件，无循环依赖 |
 | `LongTermMemoryService` | 长期记忆 | 写入前去重（同会话+同角色+0.85 阈值） |
 | `SelfEvaluationService` | 自我评估 | 5 维度评分，JSON 容错解析 |
 | `AutoFixerService` | 自动修正 | 最多 3 轮修正循环 |
-| `ToolCallGuard` | 工具调用守卫 | 按会话计数，防死循环；独立组件，无循环依赖 |
+| `SessionManager` | 会话管理 | 会话级记忆隔离，定时清理过期会话 |
+| `DeepSeekModel` | LLM 封装 | 支持 tool calling、thinking 模式 |
+
+### 领域插件层（当前：代码领域）
+
+| 抽象接口 | 当前实现 | 说明 |
+|---------|---------|------|
+| `RetrievalResult` | `RetrievedCode` | 通用检索结果，领域数据类实现它 |
+| `DocumentParser` | `JavaCodeParser` | 按领域和扩展名动态选择解析器 |
+| `RetrievalService` | `CodeRetrievalService` | 领域检索服务 |
+| `ToolPlugin` | `CodeToolPlugin` | 领域工具集 |
+| `ISubAgent` | `ExploreSubAgent` / `VerifySubAgent` / `PlanSubAgent` | 领域子 Agent |
 
 ---
 
@@ -295,49 +332,62 @@ curl -X POST http://localhost:8080/test/evaluate \
 
 ### 新增一个子 Agent
 
-实现 `ISubAgent` 接口：
-
 ```java
 @Component
+@ConditionalOnProperty(name = "agent.domain.name", havingValue = "code", matchIfMissing = true)
 public class RefactorSubAgent implements ISubAgent {
-    @Override
-    public String getName() { return "refactor"; }
 
-    @Override
-    public String getCapability() {
-        return "重构专家 - 当需要重构代码结构时使用我：\n- 提取方法\n- 消除重复";
+    @Override public String getName() { return "refactor"; }
+
+    @Override public String getDomain() { return "code"; }
+
+    @Override public String getCapability() {
+        return "重构专家 - 提取方法、消除重复、优化设计模式";
     }
 
-    @Override
-    public SubAgentResult execute(String task, Map<String, Object> context) {
+    @Override public List<String> getRoutingKeywords() {
+        return List.of("重构", "提取方法", "消除重复");
+    }
+
+    @Override public SubAgentResult execute(String task, Map<String, Object> context) {
         // 你的实现
     }
 }
 ```
 
-**无需修改路由代码**——`SubAgentRoutingService` 启动时会自动收集所有 `ISubAgent` Bean 并把能力加入 Prompt。
+**无需修改路由代码**——`SubAgentRoutingService` 启动时自动收集关键词。
 
 ### 新增一个工具
 
 ```java
 @Component
 public class MyTools {
-    @Tool("描述这个工具做什么，什么时候用")
+
+    @AgentTool(
+        name = "customAction",
+        description = "描述这个工具做什么，什么时候用",
+        readOnly = true,
+        timeout = 10
+    )
     public String customAction(
-        @P("输入参数说明") String input
+        @ToolParam(name = "input", description = "输入参数说明", required = true) String input
     ) {
         return "结果";
     }
 }
 ```
 
-工具会被 LangChain4j 自动注册到 `AgentTools` 可调用列表。
+工具由 `ToolRegistry` 扫描 `@AgentTool` 注解后自动注册到可调用列表。
+
+### 切换领域
+
+架构支持按领域切换：新增一个领域插件包，实现 `RetrievalResult` / `DocumentParser` / `RetrievalService` / `ToolPlugin` / `ISubAgent` 五个接口，修改 `application.yml` 中 `agent.domain.name` 即可。引擎层无需改动。
 
 ---
 
 ## ⚠️ 安全注意事项
 
-- 🔐 **API Key 与 Token 必须通过环境变量注入**，切勿硬编码提交到仓库
+- 🔐 **API Key 与 Token 通过环境变量注入**，切勿硬编码提交到仓库
 - 🛡️ `ReadFileTool` 有路径越界检查，务必配置合理的 `project.base-path`
 - 🚦 高风险工具建议加用户二次确认
 
@@ -352,6 +402,7 @@ public class MyTools {
 - [x] 反思闭环（评估 + 自动修正）
 - [x] 终止条件（工具调用上限）
 - [x] 跨项目调用关系分析
+- [x] 领域无关架构（支持按领域切换）
 - [ ] 接入 MCP（Model Context Protocol），工具动态发现
 - [ ] 引入 Cross-Encoder 做检索精排
 - [ ] API Key 鉴权
