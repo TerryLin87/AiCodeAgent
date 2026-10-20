@@ -13,7 +13,6 @@ import dev.langchain4j.model.chat.response.ChatResponseMetadata;
 import dev.langchain4j.model.output.FinishReason;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.util.StringUtils;
 
 import java.io.IOException;
@@ -31,8 +30,7 @@ public class DeepSeekModel implements ChatModel {
     private static final String DEFAULT_API_URL = "https://api.deepseek.com/chat/completions";
 
     private final String apiUrl;
-    @Value("${deepseek.apikey}")
-    private String apiKey = "";
+    private final String apiKey;
     private final String modelName;
     private final boolean enableThinking;
     private final String reasoningEffort;
@@ -40,10 +38,10 @@ public class DeepSeekModel implements ChatModel {
 
     private DeepSeekModel(Builder builder) {
         this.apiUrl = StringUtils.hasText(builder.apiUrl) ? builder.apiUrl : DEFAULT_API_URL;
-        this.apiKey = StringUtils.hasText(builder.apiKey)?builder.apiKey:this.apiKey;
+        this.apiKey = builder.apiKey;
         this.modelName = StringUtils.hasText(builder.modelName) ? builder.modelName : "deepseek-flash";
         this.enableThinking = builder.enableThinking;
-        this.reasoningEffort = StringUtils.hasText(builder.reasoningEffort)  ? builder.reasoningEffort : "medium";
+        this.reasoningEffort = StringUtils.hasText(builder.reasoningEffort) ? builder.reasoningEffort : "medium";
 
         if (!StringUtils.hasText(apiKey)) {
             throw new IllegalStateException("DeepSeek API Key is required");
@@ -79,7 +77,7 @@ public class DeepSeekModel implements ChatModel {
             }
             root.put("messages", messages);
 
-            // ============ 2. 序列化 tools（★ 关键新增） ============
+            // ============ 2. 序列化 tools ============
             if (request.toolSpecifications() != null && !request.toolSpecifications().isEmpty()) {
                 JSONArray tools = new JSONArray();
                 for (ToolSpecification spec : request.toolSpecifications()) {
@@ -142,7 +140,7 @@ public class DeepSeekModel implements ChatModel {
                 JSONObject choice = choices.getJSONObject(0);
                 JSONObject message = choice.getJSONObject("message");
 
-                // ============ 5. 解析响应（★ 关键改动） ============
+                // ============ 5. 解析响应 ============
                 return parseResponse(message, choice);
             }
 
@@ -162,11 +160,6 @@ public class DeepSeekModel implements ChatModel {
     // 消息序列化
     // ================================================================
 
-    /**
-     * 把 LangChain4j 的 ChatMessage 序列化成 OpenAI 格式的 JSON
-     * 关键：不同类型的 message 有不同格式，尤其是 AiMessage 带 tool_calls、
-     * ToolExecutionResultMessage 带 tool_call_id
-     */
     private JSONObject serializeMessage(ChatMessage msg) {
         JSONObject m = new JSONObject();
 
@@ -185,7 +178,6 @@ public class DeepSeekModel implements ChatModel {
         if (msg instanceof AiMessage aiMsg) {
             m.put("role", "assistant");
 
-            // ★ 关键：如果 AiMessage 有 toolExecutionRequests，必须带上 tool_calls
             List<ToolExecutionRequest> toolRequests = aiMsg.toolExecutionRequests();
             if (toolRequests != null && !toolRequests.isEmpty()) {
                 JSONArray toolCalls = new JSONArray();
@@ -200,7 +192,6 @@ public class DeepSeekModel implements ChatModel {
                     toolCalls.add(tc);
                 }
                 m.put("tool_calls", toolCalls);
-                // content 可以为 null
                 if (StringUtils.hasText(aiMsg.text())) {
                     m.put("content", aiMsg.text());
                 } else {
@@ -214,12 +205,11 @@ public class DeepSeekModel implements ChatModel {
 
         if (msg instanceof ToolExecutionResultMessage toolMsg) {
             m.put("role", "tool");
-            m.put("tool_call_id", toolMsg.id());   // ★ 必须带 tool_call_id
+            m.put("tool_call_id", toolMsg.id());
             m.put("content", toolMsg.text());
             return m;
         }
 
-        // 其他类型（如 CustomMessage），跳过
         log.warn("未处理的消息类型: {}", msg.getClass().getName());
         return null;
     }
@@ -238,7 +228,7 @@ public class DeepSeekModel implements ChatModel {
     }
 
     // ================================================================
-    // 工具定义序列化（★ 关键新增）
+    // 工具定义序列化
     // ================================================================
 
     private JSONObject serializeToolSpecification(ToolSpecification spec) {
@@ -249,12 +239,10 @@ public class DeepSeekModel implements ChatModel {
         function.put("name", spec.name());
         function.put("description", spec.description());
 
-        // 序列化参数 schema
         JsonObjectSchema params = spec.parameters();
         if (params != null) {
             function.put("parameters", serializeSchema(params));
         } else {
-            // 没有参数的工具，给个空的 object schema
             JSONObject emptySchema = new JSONObject();
             emptySchema.put("type", "object");
             emptySchema.put("properties", new JSONObject());
@@ -265,14 +253,10 @@ public class DeepSeekModel implements ChatModel {
         return tool;
     }
 
-    /**
-     * 把 LangChain4j 的 JsonObjectSchema 转成 JSON Schema
-     */
     private JSONObject serializeSchema(JsonObjectSchema schema) {
         JSONObject result = new JSONObject();
         result.put("type", "object");
 
-        // properties
         JSONObject properties = new JSONObject();
         if (schema.properties() != null) {
             for (var entry : schema.properties().entrySet()) {
@@ -281,7 +265,6 @@ public class DeepSeekModel implements ChatModel {
         }
         result.put("properties", properties);
 
-        // required
         if (schema.required() != null && !schema.required().isEmpty()) {
             JSONArray required = new JSONArray();
             required.addAll(schema.required());
@@ -291,9 +274,6 @@ public class DeepSeekModel implements ChatModel {
         return result;
     }
 
-    /**
-     * 递归序列化 schema 元素（支持嵌套对象、数组、枚举等）
-     */
     private JSONObject serializeSchemaElement(JsonSchemaElement element) {
         JSONObject obj = new JSONObject();
 
@@ -316,7 +296,7 @@ public class DeepSeekModel implements ChatModel {
                 obj.put("items", serializeSchemaElement(s.items()));
             }
         } else if (element instanceof JsonObjectSchema s) {
-            return serializeSchema(s);   // 递归
+            return serializeSchema(s);
         } else if (element instanceof JsonEnumSchema s) {
             obj.put("type", "string");
             JSONArray enumValues = new JSONArray();
@@ -324,7 +304,6 @@ public class DeepSeekModel implements ChatModel {
             obj.put("enum", enumValues);
             if (s.description() != null) obj.put("description", s.description());
         } else {
-            // 兜底：当字符串处理
             obj.put("type", "string");
         }
 
@@ -332,14 +311,13 @@ public class DeepSeekModel implements ChatModel {
     }
 
     // ================================================================
-    // 响应解析（★ 关键改动）
+    // 响应解析
     // ================================================================
 
     private ChatResponse parseResponse(JSONObject message, JSONObject choice) {
         String content = message.getString("content");
         if (content == null) content = "";
 
-        // 1. 检查是否有 tool_calls
         JSONArray toolCalls = message.getJSONArray("tool_calls");
         if (toolCalls != null && !toolCalls.isEmpty()) {
             List<ToolExecutionRequest> requests = new ArrayList<>();
@@ -368,7 +346,6 @@ public class DeepSeekModel implements ChatModel {
                     .build();
         }
 
-        // 2. 普通文本响应
         String reasoning = message.getString("reasoning_content");
         if (reasoning != null && !reasoning.isEmpty() && log.isDebugEnabled()) {
             log.debug("DeepSeek reasoning: {}", reasoning);

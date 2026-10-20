@@ -11,15 +11,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 工具调用守卫。
- *
- * <p>职责：统计每个会话的工具调用次数，超过上限时阻止继续调用，防止 Agent 死循环。
- *
- * <p>独立于 {@code CodeAgentLoopService} 和 {@code AgentTools}，
- * 两者都依赖本类，但不互相依赖，避免循环依赖。
- *
- * <p><b>为什么把"当前会话"放在这里</b>：工具方法里拿不到 sessionId，
- * 需要一个上下文传递机制。用 ThreadLocal 放在本类里，比放在
- * {@code CodeAgentLoopService} 更合适——因为两边都依赖本类，不会引入循环。
  */
 @Slf4j
 @Component
@@ -104,5 +95,17 @@ public class ToolCallGuard {
     public int currentCount(String sessionId) {
         AtomicInteger c = counters.get(sessionId);
         return c == null ? 0 : c.get();
+    }
+
+    // ================================================================
+    // 统计（新增）
+    // ================================================================
+
+    /**
+     * 当前被跟踪的会话数（调试用）。
+     * 用于 evictStaleResources 日志，替代无意义的 currentCount("__dummy__")。
+     */
+    public int getTrackedSessionCount() {
+        return counters.size();
     }
 }

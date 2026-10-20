@@ -12,6 +12,7 @@ import com.example.aiagentdemo.service.subagent.PlanSubAgent;
 import com.example.aiagentdemo.tools.ToolCallGuard;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.mcp.McpToolProvider;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.service.AiServices;
@@ -35,48 +36,17 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
-/**
- * Agent 主循环。
- *
- * <p>核心能力：
- * <ol>
- *   <li><b>双层限流</b>：全局 10 并发 + 单会话 1 并发</li>
- *   <li><b>会话级 ChatMemory 缓存</b>：跨轮复用，压缩原地生效</li>
- *   <li><b>上下文压缩</b>：五级降级，超阈值触发</li>
- *   <li><b>复杂任务规划</b>：isComplexTask 判定，计划注入 System Prompt</li>
- *   <li><b>长期记忆召回</b>：跨会话，注入 System Prompt 不污染用户消息</li>
- *   <li><b>反思闭环</b>：评估 + 修正，选择性触发，有时间上限</li>
- *   <li><b>终止条件</b>：工具调用次数上限由 {@link ToolCallGuard} 统一管理，
- *       避免与 AgentTools 形成循环依赖</li>
- * </ol>
- *
- * <p><b>循环依赖说明</b>：工具调用计数职责已抽到 {@code ToolCallGuard}，
- * 本类与 {@code AgentTools} 都只依赖它，不再互相依赖。
- * 本类负责重置/清理计数、设置 ThreadLocal；AgentTools 负责在调用时检查。
- */
 @Slf4j
 @Service
 public class CodeAgentLoopService {
 
-    /** 全局并发限制：最多 10 个请求同时执行 */
     private final Semaphore globalSemaphore = new Semaphore(10);
-
-    /** 单会话并发限制：同一会话同时只能 1 个请求 */
     private final Map<String, Semaphore> sessionSemaphores = new ConcurrentHashMap<>();
-
-    /** 会话级 ChatMemory 缓存（唯一真相源：所有会话消息都存在这里） */
     private final Map<String, ChatMemory> memoryCache = new ConcurrentHashMap<>();
-
-    /** 本轮会话的长期记忆上下文，供 systemMessageProvider 读取后即删 */
     private final Map<String, String> pendingMemoryContext = new ConcurrentHashMap<>();
-
-    /** 本轮会话的"任务计划"上下文，供 systemMessageProvider 读取后即删 */
     private final Map<String, String> pendingPlanContext = new ConcurrentHashMap<>();
 
-    /** 每个会话保留的最大消息数 */
     private static final int MEMORY_WINDOW = 50;
-
-    /** 记忆缓存硬上限，超过则触发一次空闲回收 */
     private static final int MAX_CACHED_MEMORIES = 1000;
 
     // ================================================================
@@ -108,7 +78,6 @@ public class CodeAgentLoopService {
     @Autowired
     private AutoFixerService autoFixerService;
 
-    /** 工具调用守卫（抽离出的计数职责，避免与 AgentTools 循环依赖） */
     @Autowired
     private ToolCallGuard toolCallGuard;
 
@@ -118,60 +87,70 @@ public class CodeAgentLoopService {
     @Autowired
     private DomainConfig domainConfig;
 
+    /** MCP 工具提供者（可选：MCP Server 没启动时为 null） */
+    @Autowired(required = false)
+    private McpToolProvider mcpToolProvider;
+
     // ================================================================
     // 配置项
     // ================================================================
 
-    /** 是否启用反思闭环 */
     @Value("${agent.reflexion.enabled:true}")
     private boolean reflexionEnabled;
 
-    /** 评分阈值，低于这个分数触发修正 */
     @Value("${agent.reflexion.score-threshold:7.0}")
     private double scoreThreshold;
 
-    /** 反思环节最大耗时（毫秒），超过就放弃修正，避免拖慢响应 */
     @Value("${agent.reflexion.max-duration-ms:30000}")
     private long reflexionMaxDurationMs;
 
     // ================================================================
-    // Assistant 接口
-    // 注意：不再使用 @SystemMessage 注解，系统提示词改由 systemMessageProvider 动态提供
-    // （这样才能把"长期记忆/计划"注入 System Prompt，而不是塞进用户消息）。
+    // Assistant
     // ================================================================
 
     public interface CodingAssistant {
         String chat(@MemoryId String sessionId, @UserMessage String message);
     }
 
-    /** 全程只构建一次的 Assistant 代理 */
     private CodingAssistant assistant;
 
     @PostConstruct
     public void init() {
-        // 按当前领域筛选工具
+        // 按当前领域筛选本地工具
         List<Object> activeTools = toolPlugins.stream()
                 .filter(p -> p.getDomainName().equals(domainConfig.getName()))
                 .flatMap(p -> p.getToolBeans().stream())
-                .toList();
+                .collect(Collectors.toList());
 
         if (activeTools.isEmpty()) {
             throw new IllegalStateException(
                     "领域 " + domainConfig.getName() + " 没有注册任何工具，请检查 ToolPlugin 实现");
         }
 
-        this.assistant = AiServices.builder(CodingAssistant.class)
+        var builder = AiServices.builder(CodingAssistant.class)
                 .chatModel(deepSeekModel)
                 .chatMemoryProvider(memoryId -> memoryOf((String) memoryId))
-                .systemMessageProvider(memoryId -> buildSystemPrompt((String) memoryId))
-                .tools(activeTools.toArray())
-                .build();
-        log.info("CodingAssistant 初始化完成，领域={}, 工具数={}, 工具=[{}]",
+                .systemMessageProvider(memoryId -> buildSystemPrompt((String) memoryId));
+
+        // 装配本地工具
+        builder.tools(activeTools.toArray(new Object[0]));
+
+        // ★ 装配 MCP 工具（如果 MCP Server 可用）
+        if (mcpToolProvider != null) {
+            builder.toolProvider(mcpToolProvider);
+            log.info("已接入 MCP 工具提供者");
+        } else {
+            log.warn("MCP 工具提供者未注入，仅使用本地工具");
+        }
+
+        this.assistant = builder.build();
+
+        log.info("CodingAssistant 初始化完成，领域={}, 本地工具数={}, 工具=[{}]",
                 domainConfig.getName(),
                 activeTools.size(),
                 activeTools.stream()
                         .map(t -> t.getClass().getSimpleName())
-                        .collect(java.util.stream.Collectors.joining(", ")));
+                        .collect(Collectors.joining(", ")));
     }
 
     // ================================================================
@@ -179,19 +158,18 @@ public class CodeAgentLoopService {
     // ================================================================
 
     public String execute(String userMessage) throws InterruptedException {
-        String sessionId = UUID.randomUUID().toString();
-        return execute(sessionId, userMessage);
+        return execute(UUID.randomUUID().toString(), userMessage);
     }
 
     public String execute(String sessionId, String userMessage) throws InterruptedException {
-        // 全局限流
         if (!globalSemaphore.tryAcquire(5, TimeUnit.SECONDS)) {
+            log.warn("全局限流触发，拒绝请求");
             return "系统繁忙，请稍后重试";
         }
         try {
-            // 会话级限流
             Semaphore sessionSem = sessionSemaphores.computeIfAbsent(sessionId, k -> new Semaphore(1));
             if (!sessionSem.tryAcquire(3, TimeUnit.SECONDS)) {
+                log.warn("会话 {} 限流触发，拒绝请求", sessionId);
                 return "当前会话有请求正在处理，请稍后";
             }
             try {
@@ -211,20 +189,15 @@ public class CodeAgentLoopService {
         log.info("Agent 开始执行: session={}, message={}", sessionId, userMessage);
         long startTime = System.currentTimeMillis();
 
-        // ★ 重置本会话的工具调用计数
         toolCallGuard.reset(sessionId);
-        // ★ 设置当前会话到 ThreadLocal，供 AgentTools 读取
         ToolCallGuard.setCurrentSession(sessionId);
 
         try {
-            // ===== 1. 确保会话存在（作为审计镜像） =====
             AgentSession session = sessionManager.getOrCreateSession(sessionId);
             log.info("会话状态: 消息数={}", session.getMessages().size());
 
-            // ===== 2. 取会话级 ChatMemory（唯一真相源，跨轮复用） =====
             ChatMemory memory = memoryOf(sessionId);
 
-            // ===== 3. 压缩：原地生效，结果不再丢失 =====
             if (contextCompressor.needsCompression(memory.messages())) {
                 log.info("触发上下文压缩，压缩前消息数: {}", memory.messages().size());
                 List<ChatMessage> compressed = contextCompressor.compress(memory.messages());
@@ -232,7 +205,6 @@ public class CodeAgentLoopService {
                 log.info("上下文压缩完成，压缩后消息数: {}", compressed.size());
             }
 
-            // ===== 4. 复杂任务先规划 =====
             if (planSubAgent != null && isComplex(userMessage)) {
                 long planStart = System.currentTimeMillis();
                 try {
@@ -244,23 +216,18 @@ public class CodeAgentLoopService {
                                 System.currentTimeMillis() - planStart, planText.length());
                     }
                 } catch (Exception e) {
-                    // 规划失败不阻断主流程，降级为不注入计划
                     log.warn("生成执行计划失败，按普通任务处理: {}", e.getMessage());
                 }
             }
 
-            // ===== 5. 检索长期记忆（跨会话），暂存供 System Prompt 使用 =====
             List<MemoryDocument> relevantMemories =
                     longTermMemoryService.retrieveRelevantMemories(userMessage, 3);
             pendingMemoryContext.put(sessionId, formatMemoryContext(relevantMemories));
 
-            // ===== 6. 调用 Agent（用户消息保持原样，不拼记忆/计划） =====
             String response = assistant.chat(sessionId, userMessage);
 
-            // ===== 7. 反思闭环：评估 + 修正（可选） =====
             response = applyReflexion(sessionId, userMessage, response);
 
-            // ===== 8. 审计镜像 + 长期记忆 =====
             sessionManager.addUserMessage(sessionId, userMessage);
             sessionManager.addAssistantMessage(sessionId, response);
             longTermMemoryService.storeMemory(sessionId, "user", userMessage);
@@ -276,7 +243,7 @@ public class CodeAgentLoopService {
         } finally {
             pendingMemoryContext.remove(sessionId);
             pendingPlanContext.remove(sessionId);
-            // ★ 必须清理 ThreadLocal，避免线程池复用时串会话
+            // ★ 必须清理 ThreadLocal，避免线程池复用时下一个请求读到上一个会话的 sessionId
             ToolCallGuard.clearCurrentSession();
         }
     }
@@ -285,25 +252,7 @@ public class CodeAgentLoopService {
     // 反思闭环
     // ================================================================
 
-    /**
-     * 反思闭环：对 LLM 输出做质量评估，不达标则触发自动修正。
-     *
-     * <p>设计要点：
-     * <ul>
-     *   <li><b>选择性触发</b>：只有生成/方案/分析类任务才反思，简单查询跳过</li>
-     *   <li><b>时间上限</b>：反思总耗时超过 {@link #reflexionMaxDurationMs} 就放弃，
-     *       保留原答案，避免拖慢响应</li>
-     *   <li><b>空值保护</b>：修正结果为空时保留原答案</li>
-     *   <li><b>失败不影响主流程</b>：反思任何环节异常都捕获，返回原答案</li>
-     * </ul>
-     *
-     * @param sessionId   会话 ID
-     * @param userMessage 用户原始消息（作为评估的 context）
-     * @param response    LLM 生成的回答
-     * @return 可能被修正后的回答，或原回答
-     */
     private String applyReflexion(String sessionId, String userMessage, String response) {
-        // 前置检查
         if (!reflexionEnabled) {
             log.debug("会话 {} 反思已关闭，跳过", sessionId);
             return response;
@@ -318,39 +267,33 @@ public class CodeAgentLoopService {
 
         long reflectStart = System.currentTimeMillis();
         try {
-            // 1. 评估
             EvaluationResult eval = evaluationService.evaluate(response, userMessage);
             log.info("会话 {} 反思评估: 总分={}, 通过={}",
                     sessionId, eval.getOverallScore(), eval.isPassed());
 
-            // 2. 评估超时保护
             if (System.currentTimeMillis() - reflectStart > reflexionMaxDurationMs) {
                 log.warn("会话 {} 评估耗时超过上限 {}ms，跳过修正",
                         sessionId, reflexionMaxDurationMs);
                 return response;
             }
 
-            // 3. 达标直接返回
             if (eval.isPassed() || eval.getOverallScore() >= scoreThreshold) {
                 log.debug("会话 {} 质量达标（{}），无需修正",
                         sessionId, eval.getOverallScore());
                 return response;
             }
 
-            // 4. 不达标，触发修正
             log.info("会话 {} 质量未达标（{} < {}），触发自动修正",
                     sessionId, eval.getOverallScore(), scoreThreshold);
 
             var fixResult = autoFixerService.fix(response, userMessage, eval);
 
-            // 5. 修正超时保护
             if (System.currentTimeMillis() - reflectStart > reflexionMaxDurationMs) {
                 log.warn("会话 {} 修正耗时超过上限 {}ms，保留原答案",
                         sessionId, reflexionMaxDurationMs);
                 return response;
             }
 
-            // 6. 修正结果处理（含空值保护）
             if (fixResult.isPassed()
                     && fixResult.getFinalContent() != null
                     && !fixResult.getFinalContent().isBlank()) {
@@ -366,7 +309,6 @@ public class CodeAgentLoopService {
             return response;
 
         } catch (Exception e) {
-            // 反思失败不影响主流程，返回原答案
             log.warn("会话 {} 反思环节异常，保留原答案: {}", sessionId, e.getMessage());
             return response;
         } finally {
@@ -375,18 +317,11 @@ public class CodeAgentLoopService {
         }
     }
 
-    /**
-     * 判断任务是否值得触发反思。
-     *
-     * <p>反思会多调 1-2 次 LLM，所以只对"生成类/方案类/分析类"任务触发。
-     * 简单查询（"找 XX 类"、"XX 有哪些方法"）不反思。
-     */
     private boolean shouldReflect(String userMessage) {
         if (userMessage == null || userMessage.isBlank()) {
             return false;
         }
         String lower = userMessage.toLowerCase();
-        // 生成、方案、分析、设计、优化、评审类任务才反思
         return lower.contains("实现") || lower.contains("生成")
                 || lower.contains("重构") || lower.contains("方案")
                 || lower.contains("分析") || lower.contains("设计")
@@ -398,9 +333,6 @@ public class CodeAgentLoopService {
     // 记忆 / 提示词
     // ================================================================
 
-    /**
-     * 获取（或创建）会话级 ChatMemory。
-     */
     private ChatMemory memoryOf(String sessionId) {
         ChatMemory cached = memoryCache.get(sessionId);
         if (cached != null) {
@@ -415,10 +347,6 @@ public class CodeAgentLoopService {
                 .build());
     }
 
-    /**
-     * 用给定消息整体替换记忆内容。
-     * 用 clear()+add() 而不是 set()，兼容 LangChain4j 1.11.0 以下版本。
-     */
     private void replaceMemory(ChatMemory memory, List<ChatMessage> messages) {
         memory.clear();
         if (messages != null) {
@@ -428,11 +356,7 @@ public class CodeAgentLoopService {
         }
     }
 
-    /**
-     * 构建系统提示词：基础提示 + 本轮计划 + 长期记忆（放在 System 侧，不污染用户消息）。
-     */
     private String buildSystemPrompt(String sessionId) {
-        // 基础 Prompt 从 DomainConfig 加载（换领域只改 YAML）
         String basePrompt = domainConfig.getSystemPrompt();
         if (basePrompt == null || basePrompt.isBlank()) {
             basePrompt = "你是一个智能助手。";
@@ -455,23 +379,16 @@ public class CodeAgentLoopService {
         return sb.toString();
     }
 
-    /**
-     * 回收已过期/已删除会话占用的资源，防止无界增长。
-     * 每 5 分钟执行一次；也作为内存缓存的溢出兜底。
-     */
     @Scheduled(fixedDelay = 300_000, initialDelay = 300_000)
     public void evictStaleResources() {
         Set<String> alive = new HashSet<>(sessionManager.getAllSessionIds());
 
-        // 记忆/上下文缓存：直接移除已不存在的会话
         memoryCache.keySet().removeIf(id -> !alive.contains(id));
         pendingMemoryContext.keySet().removeIf(id -> !alive.contains(id));
         pendingPlanContext.keySet().removeIf(id -> !alive.contains(id));
 
-        // 工具调用计数：委托给 ToolCallGuard 清理
         toolCallGuard.evict(alive);
 
-        // 信号量：仅当"当前无人持锁"时才移除，避免并发下出现两个信号量实例
         sessionSemaphores.entrySet().removeIf(entry -> {
             if (alive.contains(entry.getKey())) {
                 return false;
@@ -484,17 +401,14 @@ public class CodeAgentLoopService {
             return false;
         });
 
-        log.debug("资源回收完成: memories={}, sessionSemaphores={}, toolCounters={}",
-                memoryCache.size(), sessionSemaphores.size(), toolCallGuard.currentCount("__dummy__"));
+        log.debug("资源回收完成: memories={}, sessionSemaphores={}, toolTrackedSessions={}",
+                memoryCache.size(), sessionSemaphores.size(), toolCallGuard.getTrackedSessionCount());
     }
 
     // ================================================================
-    // 辅助方法
+    // 辅助
     // ================================================================
 
-    /**
-     * 格式化长期记忆上下文。
-     */
     private String formatMemoryContext(List<MemoryDocument> memories) {
         if (memories == null || memories.isEmpty()) {
             return "";
@@ -509,9 +423,6 @@ public class CodeAgentLoopService {
                 .collect(Collectors.joining("\n\n"));
     }
 
-    /**
-     * 恢复建议。
-     */
     private String getRecoverySuggestion(Exception e) {
         String message = e.getMessage();
         if (message == null) {
@@ -529,10 +440,6 @@ public class CodeAgentLoopService {
         return "请检查日志后重试";
     }
 
-    /**
-     * 判断任务是否"复杂"到需要先走 Plan 子 Agent。
-     * 委托给 SubAgentRoutingService，统一判定逻辑。
-     */
     private boolean isComplex(String userMessage) {
         try {
             return subAgentRoutingService.isComplexTask(userMessage);
@@ -541,10 +448,6 @@ public class CodeAgentLoopService {
             return false;
         }
     }
-
-    // ================================================================
-    // 状态查询
-    // ================================================================
 
     public AgentStatus getStatus() {
         return AgentStatus.IDLE;

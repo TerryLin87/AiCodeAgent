@@ -57,8 +57,8 @@ public class CodeRetrievalService {
     private int fallbackDimension = 1024;
 
     // Milvus 单次 topK 上限
-    @Value("${agent.milvus.max-top-k:16384}")
-    private int maxTopK = 16384;
+    @Value("${agent.milvus.max-top-k:1024}")
+    private int maxTopK = 1024;
 
     // 运行时探测到的向量维度，-1 表示尚未探测
     private volatile int dimension = -1;
