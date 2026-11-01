@@ -85,7 +85,7 @@ public class AgentSession {
     /**
      * 添加消息
      */
-    public void addMessage(ChatMessage message) {
+    public synchronized void addMessage(ChatMessage message) {
         if (this.chatMemory == null) {
             this.chatMemory = MessageWindowChatMemory.builder()
                     .maxMessages(50)
@@ -98,7 +98,7 @@ public class AgentSession {
     /**
      * 获取所有消息
      */
-    public List<ChatMessage> getMessages(){
+    public synchronized List<ChatMessage> getMessages(){
         if(this.chatMemory == null){
             return new ArrayList<>();
         }
@@ -108,7 +108,7 @@ public class AgentSession {
     /**
      * 获取最近 N 条消息
      */
-    public List<ChatMessage> getRecentMessages(int n) {
+    public synchronized List<ChatMessage> getRecentMessages(int n) {
         if (this.chatMemory == null || this.chatMemory.messages().isEmpty()) {
             return new ArrayList<>();
         }
@@ -120,7 +120,7 @@ public class AgentSession {
     /**
      * 获取 ChatMemory（懒加载）
      */
-    public ChatMemory getChatMemory() {
+    public synchronized ChatMemory getChatMemory() {
         if (this.chatMemory == null) {
             this.chatMemory = MessageWindowChatMemory.builder()
                     .maxMessages(50)
@@ -129,10 +129,23 @@ public class AgentSession {
         return this.chatMemory;
     }
 
+    public synchronized void replaceChatMemory(List<ChatMessage> messages) {
+        ChatMemory memory = MessageWindowChatMemory.builder()
+                .maxMessages(50)
+                .build();
+        if (messages != null) {
+            for (ChatMessage msg : messages) {
+                memory.add(msg);
+            }
+        }
+        this.chatMemory = memory;
+        this.lastAccessAt = LocalDateTime.now();
+    }
+
     /**
      * 更新上下文
      */
-    public void updateContext(String key, Object value) {
+    public synchronized void updateContext(String key, Object value) {
         if (this.context == null) {
             this.context = new ConcurrentHashMap<>();
         }

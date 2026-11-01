@@ -42,7 +42,6 @@ public class CodeAgentLoopService {
 
     private final Semaphore globalSemaphore = new Semaphore(10);
     private final Map<String, Semaphore> sessionSemaphores = new ConcurrentHashMap<>();
-    private final Map<String, ChatMemory> memoryCache = new ConcurrentHashMap<>();
     private final Map<String, String> pendingMemoryContext = new ConcurrentHashMap<>();
     private final Map<String, String> pendingPlanContext = new ConcurrentHashMap<>();
 
@@ -129,7 +128,11 @@ public class CodeAgentLoopService {
 
         var builder = AiServices.builder(CodingAssistant.class)
                 .chatModel(deepSeekModel)
-                .chatMemoryProvider(memoryId -> memoryOf((String) memoryId))
+                // 改用 SessionManager 提供的 memory
+                .chatMemoryProvider(memoryId -> {
+                    String sessionId = (String) memoryId;
+                    return sessionManager.getOrCreateSession(sessionId).getChatMemory();
+                })
                 .systemMessageProvider(memoryId -> buildSystemPrompt((String) memoryId));
 
         // 装配本地工具
@@ -201,7 +204,8 @@ public class CodeAgentLoopService {
             if (contextCompressor.needsCompression(memory.messages())) {
                 log.info("触发上下文压缩，压缩前消息数: {}", memory.messages().size());
                 List<ChatMessage> compressed = contextCompressor.compress(memory.messages());
-                replaceMemory(memory, compressed);
+                // 2. 通过 SessionManager 原子替换并持久化
+                sessionManager.replaceSessionMemory(sessionId, compressed);
                 log.info("上下文压缩完成，压缩后消息数: {}", compressed.size());
             }
 
@@ -334,26 +338,9 @@ public class CodeAgentLoopService {
     // ================================================================
 
     private ChatMemory memoryOf(String sessionId) {
-        ChatMemory cached = memoryCache.get(sessionId);
-        if (cached != null) {
-            return cached;
-        }
-        if (memoryCache.size() >= MAX_CACHED_MEMORIES) {
-            evictStaleResources();
-        }
-        return memoryCache.computeIfAbsent(sessionId, id -> MessageWindowChatMemory.builder()
-                .id(id)
-                .maxMessages(MEMORY_WINDOW)
-                .build());
-    }
-
-    private void replaceMemory(ChatMemory memory, List<ChatMessage> messages) {
-        memory.clear();
-        if (messages != null) {
-            for (ChatMessage msg : messages) {
-                memory.add(msg);
-            }
-        }
+        // 直接从 SessionManager 拿会话里绑定的 ChatMemory
+        AgentSession session = sessionManager.getOrCreateSession(sessionId);
+        return session.getChatMemory();
     }
 
     private String buildSystemPrompt(String sessionId) {
@@ -382,8 +369,6 @@ public class CodeAgentLoopService {
     @Scheduled(fixedDelay = 300_000, initialDelay = 300_000)
     public void evictStaleResources() {
         Set<String> alive = new HashSet<>(sessionManager.getAllSessionIds());
-
-        memoryCache.keySet().removeIf(id -> !alive.contains(id));
         pendingMemoryContext.keySet().removeIf(id -> !alive.contains(id));
         pendingPlanContext.keySet().removeIf(id -> !alive.contains(id));
 
@@ -400,9 +385,6 @@ public class CodeAgentLoopService {
             }
             return false;
         });
-
-        log.debug("资源回收完成: memories={}, sessionSemaphores={}, toolTrackedSessions={}",
-                memoryCache.size(), sessionSemaphores.size(), toolCallGuard.getTrackedSessionCount());
     }
 
     // ================================================================
@@ -455,7 +437,6 @@ public class CodeAgentLoopService {
 
     public void reset() {
         sessionManager.clearAllSessions();
-        memoryCache.clear();
         pendingMemoryContext.clear();
         pendingPlanContext.clear();
         sessionSemaphores.clear();

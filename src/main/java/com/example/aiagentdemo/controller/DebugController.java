@@ -9,19 +9,22 @@ import com.example.aiagentdemo.service.subagent.SubAgentScheduler;
 import com.example.aiagentdemo.tools.ProjectStructureTool;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 调试与测试控制器。
+ * 仅在非生产环境（!prod）可用，防止生产环境暴露底层操作接口。
+ */
 @Slf4j
 @RestController
-@RequestMapping("/test")
-public class TestController {
-
-    @Autowired
-    private CodeAgentLoopService agentLoopService;
+@RequestMapping("/debug")
+@Profile("!prod")
+public class DebugController {
 
     @Autowired
     private CodeRetrievalService retrievalService;
@@ -54,80 +57,12 @@ public class TestController {
     private ProjectStructureTool projectStructureTool;
 
     // ============================================================
-    // 1. Agent 主入口测试（最核心）
-    // ============================================================
-
-    /**
-     * 基础对话（自动生成 sessionId）
-     * POST /test/chat
-     * body: { "message": "帮我搜索用户登录相关的代码" }
-     */
-    @PostMapping("/chat")
-    public Map<String, Object> chat(@RequestBody Map<String, String> request) {
-        String message = request.get("message");
-        long start = System.currentTimeMillis();
-
-        try {
-            String response = agentLoopService.execute(message);
-
-            return Map.of(
-                    "success", true,
-                    "response", response,
-                    "costMs", System.currentTimeMillis() - start,
-                    "activeSessions", agentLoopService.getActiveSessionCount()
-            );
-        } catch (Exception e) {
-            log.error("chat 失败", e);
-            return Map.of(
-                    "success", false,
-                    "error", e.getMessage(),
-                    "costMs", System.currentTimeMillis() - start
-            );
-        }
-    }
-
-    /**
-     * 带 sessionId 的对话（支持多轮）
-     * POST /test/chat/session
-     * body: { "sessionId": "session-abc123", "message": "继续分析" }
-     */
-    @PostMapping("/chat/session")
-    public Map<String, Object> chatWithSession(@RequestBody Map<String, String> request) {
-        String sessionId = request.get("sessionId");
-        String message = request.get("message");
-
-        if (sessionId == null || sessionId.isBlank()) {
-            return Map.of("success", false, "error", "sessionId 不能为空");
-        }
-
-        long start = System.currentTimeMillis();
-        try {
-            String response = agentLoopService.execute(sessionId, message);
-
-            // 返回会话状态
-            AgentSession session = sessionManager.getSession(sessionId);
-            int messageCount = session != null ? session.getMessages().size() : 0;
-
-            return Map.of(
-                    "success", true,
-                    "sessionId", sessionId,
-                    "response", response,
-                    "messageCount", messageCount,
-                    "costMs", System.currentTimeMillis() - start
-            );
-        } catch (Exception e) {
-            log.error("chatWithSession 失败", e);
-            return Map.of("success", false, "error", e.getMessage());
-        }
-    }
-
-    // ============================================================
-    // 2. 会话管理测试
+    // 1. 会话管理测试
     // ============================================================
 
     /**
      * 创建新会话
-     * POST /test/session/create
+     * POST /debug/session/create
      */
     @PostMapping("/session/create")
     public Map<String, Object> createSession() {
@@ -141,7 +76,7 @@ public class TestController {
 
     /**
      * 获取会话详情
-     * GET /test/session/{sessionId}
+     * GET /debug/session/{sessionId}
      */
     @GetMapping("/session/{sessionId}")
     public Map<String, Object> getSession(@PathVariable String sessionId) {
@@ -167,7 +102,7 @@ public class TestController {
 
     /**
      * 获取所有活跃会话 ID
-     * GET /test/session/list
+     * GET /debug/session/list
      */
     @GetMapping("/session/list")
     public Map<String, Object> listSessions() {
@@ -180,7 +115,7 @@ public class TestController {
 
     /**
      * 删除指定会话
-     * DELETE /test/session/{sessionId}
+     * DELETE /debug/session/{sessionId}
      */
     @DeleteMapping("/session/{sessionId}")
     public Map<String, Object> deleteSession(@PathVariable String sessionId) {
@@ -190,7 +125,7 @@ public class TestController {
 
     /**
      * 清空所有会话
-     * POST /test/session/clear
+     * POST /debug/session/clear
      */
     @PostMapping("/session/clear")
     public Map<String, Object> clearAllSessions() {
@@ -200,13 +135,12 @@ public class TestController {
     }
 
     // ============================================================
-    // 3. 代码检索测试
+    // 2. 代码检索测试
     // ============================================================
 
     /**
      * 纯语义检索
-     * POST /test/retrieval/semantic
-     * body: { "query": "用户登录", "maxResults": 5, "projectName": "framework" }
+     * POST /debug/retrieval/semantic
      */
     @PostMapping("/retrieval/semantic")
     public Map<String, Object> semanticSearch(@RequestBody Map<String, Object> request) {
@@ -229,8 +163,7 @@ public class TestController {
 
     /**
      * 混合检索（语义 + 关键词，RRF 融合）
-     * POST /test/retrieval/hybrid
-     * body: { "query": "用户登录", "maxResults": 5 }
+     * POST /debug/retrieval/hybrid
      */
     @PostMapping("/retrieval/hybrid")
     public Map<String, Object> hybridSearch(@RequestBody Map<String, Object> request) {
@@ -253,7 +186,7 @@ public class TestController {
 
     /**
      * 按类名精确查找
-     * GET /test/retrieval/class/{className}
+     * GET /debug/retrieval/class/{className}
      */
     @GetMapping("/retrieval/class/{className}")
     public Map<String, Object> findByClassName(
@@ -270,7 +203,7 @@ public class TestController {
 
     /**
      * 查询 Milvus 集合记录数
-     * GET /test/retrieval/count
+     * GET /debug/retrieval/count
      */
     @GetMapping("/retrieval/count")
     public Map<String, Object> getCollectionCount() {
@@ -280,7 +213,7 @@ public class TestController {
 
     /**
      * 列出某个项目的所有代码片段（调试用）
-     * GET /test/retrieval/segments?projectName=framework&limit=20
+     * GET /debug/retrieval/segments?projectName=framework&limit=20
      */
     @GetMapping("/retrieval/segments")
     public Map<String, Object> getAllSegments(
@@ -295,13 +228,12 @@ public class TestController {
     }
 
     // ============================================================
-    // 4. 长期记忆测试
+    // 3. 长期记忆测试
     // ============================================================
 
     /**
      * 手动存入一条记忆
-     * POST /test/memory/store
-     * body: { "sessionId": "s1", "role": "user", "content": "记住我喜欢用 Lombok" }
+     * POST /debug/memory/store
      */
     @PostMapping("/memory/store")
     public Map<String, Object> storeMemory(@RequestBody Map<String, String> request) {
@@ -315,8 +247,7 @@ public class TestController {
 
     /**
      * 检索相关记忆
-     * POST /test/memory/retrieve
-     * body: { "query": "用户偏好", "maxResults": 3 }
+     * POST /debug/memory/retrieve
      */
     @PostMapping("/memory/retrieve")
     public Map<String, Object> retrieveMemory(@RequestBody Map<String, Object> request) {
@@ -340,12 +271,12 @@ public class TestController {
     }
 
     // ============================================================
-    // 5. 工作记忆测试
+    // 4. 工作记忆测试
     // ============================================================
 
     /**
      * 查看工作记忆
-     * GET /test/working-memory/{sessionId}
+     * GET /debug/working-memory/{sessionId}
      */
     @GetMapping("/working-memory/{sessionId}")
     public Map<String, Object> getWorkingMemory(@PathVariable String sessionId) {
@@ -365,12 +296,12 @@ public class TestController {
     }
 
     // ============================================================
-    // 6. 子 Agent 测试
+    // 5. 子 Agent 测试
     // ============================================================
 
     /**
      * 列出所有子 Agent 能力
-     * GET /test/subagent/list
+     * GET /debug/subagent/list
      */
     @GetMapping("/subagent/list")
     public Map<String, Object> listSubAgents() {
@@ -383,8 +314,7 @@ public class TestController {
 
     /**
      * 直接委托给指定子 Agent
-     * POST /test/subagent/delegate
-     * body: { "agentName": "explore", "task": "搜索用户登录相关代码" }
+     * POST /debug/subagent/delegate
      */
     @PostMapping("/subagent/delegate")
     public Map<String, Object> delegateSubAgent(@RequestBody Map<String, Object> request) {
@@ -406,13 +336,12 @@ public class TestController {
     }
 
     // ============================================================
-    // 7. 自我评估 & 自动修正测试
+    // 6. 自我评估 & 自动修正测试
     // ============================================================
 
     /**
      * 评估一段代码/回答的质量
-     * POST /test/evaluate
-     * body: { "content": "public class A {}", "context": "要求实现用户管理" }
+     * POST /debug/evaluate
      */
     @PostMapping("/evaluate")
     public Map<String, Object> evaluate(@RequestBody Map<String, String> request) {
@@ -441,17 +370,14 @@ public class TestController {
 
     /**
      * 自动修正
-     * POST /test/autofix
-     * body: { "content": "有问题的代码", "context": "需求描述" }
+     * POST /debug/autofix
      */
     @PostMapping("/autofix")
     public Map<String, Object> autofix(@RequestBody Map<String, String> request) {
         String content = request.get("content");
         String context = request.getOrDefault("context", "");
 
-        // 先评估
         EvaluationResult eval = evaluationService.evaluate(content, context);
-        // 再修正
         var fixResult = autoFixerService.fix(content, context, eval);
 
         return Map.of(
@@ -465,12 +391,12 @@ public class TestController {
     }
 
     // ============================================================
-    // 8. 项目结构 & 调用关系测试
+    // 7. 项目结构 & 调用关系测试
     // ============================================================
 
     /**
      * 查看所有项目关系
-     * GET /test/project/relations
+     * GET /debug/project/relations
      */
     @GetMapping("/project/relations")
     public Map<String, Object> getProjectRelations() {
@@ -480,7 +406,7 @@ public class TestController {
 
     /**
      * 查看指定项目结构
-     * GET /test/project/structure/{projectName}
+     * GET /debug/project/structure/{projectName}
      */
     @GetMapping("/project/structure/{projectName}")
     public Map<String, Object> getProjectStructure(@PathVariable String projectName) {
@@ -490,7 +416,7 @@ public class TestController {
 
     /**
      * 查询谁调用了某个方法
-     * GET /test/call/callers?className=XxxService&methodName=findById
+     * GET /debug/call/callers?className=XxxService&methodName=findById
      */
     @GetMapping("/call/callers")
     public Map<String, Object> getCallers(
@@ -513,7 +439,7 @@ public class TestController {
 
     /**
      * 分析变更影响范围
-     * GET /test/call/impact?className=XxxService&methodName=findById&depth=3
+     * GET /debug/call/impact?className=XxxService&methodName=findById&depth=3
      */
     @GetMapping("/call/impact")
     public Map<String, Object> analyzeImpact(
@@ -530,29 +456,6 @@ public class TestController {
                 "affected", affected,
                 "report", report
         );
-    }
-
-    // ============================================================
-    // 9. 健康检查
-    // ============================================================
-
-    /**
-     * 系统状态总览
-     * GET /test/health
-     */
-    @GetMapping("/health")
-    public Map<String, Object> health() {
-        Map<String, Object> result = new HashMap<>();
-        result.put("status", "UP");
-        result.put("timestamp", System.currentTimeMillis());
-        try {
-            result.put("milvusCount", retrievalService.getCollectionCount());
-        } catch (Exception e) {
-            result.put("milvusCount", "ERROR: " + e.getMessage());
-        }
-        result.put("activeSessions", sessionManager.getActiveSessionCount());
-        result.put("subAgents", subAgentScheduler.getAgentNames());
-        return result;
     }
 
     // ============================================================

@@ -159,6 +159,33 @@
             <groupId>com.github.ben-manes.caffeine</groupId>
             <artifactId>caffeine</artifactId>
         </dependency>
+
+        <!-- Redis 会话持久化 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+            <version>4.0.6</version> <!-- 或者试试 4.0.0 -->
+        </dependency>
+
+        <!-- AOP：ToolGuardAspect 工具横切 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aspectj</artifactId>
+        </dependency>
+
+        <!-- Validation：入口参数校验 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+            <version>4.0.6</version>
+        </dependency>
+
+        <!-- Resilience4j RateLimiter：入口限流 -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-ratelimiter</artifactId>
+            <version>2.4.0</version>
+        </dependency>
     </dependencies>
 
     <build>

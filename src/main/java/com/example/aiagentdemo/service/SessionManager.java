@@ -1,6 +1,7 @@
 package com.example.aiagentdemo.service;
 
 import com.example.aiagentdemo.data.AgentSession;
+import com.example.aiagentdemo.instances.ISessionStore;
 import dev.langchain4j.data.message.ChatMessage;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -12,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 会话管理器。
@@ -25,222 +27,186 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class SessionManager {
 
-    /**
-     * 内存存储（生产环境可替换为 Redis）
-     */
-    private final Map<String, AgentSession> sessions = new ConcurrentHashMap<>();
+    private final ISessionStore sessionStore;
 
-    /**
-     * 系统提示词（所有会话共用，不作为消息写入会话，见类注释）
-     */
+    /** 按 sessionId 分段锁，避免同一会话并发写冲突 */
+    private final Map<String, ReentrantLock> sessionLocks = new ConcurrentHashMap<>();
+
     @Getter
     private String systemPrompt = """
             你是一个智能的 Java 代码助手，具有调用工具和委托子 Agent 的能力。
-
             请根据用户需求，合理使用工具完成任务。
-            如果任务复杂，可以分解为多个步骤逐步完成。
-            如果信息不足，先通过工具获取信息再回答。
             """;
 
-    //region 核心方法
+    public SessionManager(ISessionStore sessionStore) {
+        this.sessionStore = sessionStore;
+    }
 
-    /**
-     * 获取或创建会话（推荐入口）
-     */
+    private ReentrantLock lockOf(String sessionId) {
+        return sessionLocks.computeIfAbsent(sessionId, k -> new ReentrantLock());
+    }
+
     public AgentSession getOrCreateSession(String sessionId) {
         return getOrCreateSession(sessionId, null);
     }
 
-    /**
-     * 获取或创建会话（带用户ID）
-     */
     public AgentSession getOrCreateSession(String sessionId, String userId) {
-        AgentSession session = sessions.get(sessionId);
-
-        if (session == null) {
-            log.info("会话不存在，创建新会话: sessionId={}", sessionId);
-            session = createSession(sessionId, userId);
+        if (sessionId == null || sessionId.isBlank()) {
+            throw new IllegalArgumentException("sessionId 不能为空");
         }
-
-        session.setLastAccessAt(LocalDateTime.now());
-
-        if (session.getStatus() == AgentSession.SessionStatus.EXPIRED) {
-            log.warn("会话已过期，重新激活：sessionId={}", sessionId);
-            session.setStatus(AgentSession.SessionStatus.ACTIVE);
+        ReentrantLock lock = lockOf(sessionId);
+        lock.lock();
+        try {
+            AgentSession session = sessionStore.get(sessionId);
+            if (session == null) {
+                session = createSession(sessionId, userId);
+            }
+            session.setLastAccessAt(LocalDateTime.now());
+            if (session.getStatus() == AgentSession.SessionStatus.EXPIRED) {
+                session.setStatus(AgentSession.SessionStatus.ACTIVE);
+            }
+            sessionStore.put(session);
+            return session;
+        } finally {
+            lock.unlock();
         }
-
-        return session;
     }
 
-    /**
-     * 创建新会话（内部使用）
-     */
     private AgentSession createSession(String sessionId, String userId) {
         AgentSession session = AgentSession.createNew(sessionId);
         session.setUserId(userId);
-        sessions.put(sessionId, session);
         log.info("创建会话: sessionId={}, userId={}", sessionId, userId);
         return session;
     }
 
-    /**
-     * 创建新会话（外部入口，自动生成ID）
-     */
     public AgentSession createNewSession() {
         return createNewSession(null);
     }
 
-    /**
-     * 创建新会话（外部入口，自动生成ID，带用户ID）
-     */
     public AgentSession createNewSession(String userId) {
         String sessionId = generateSessionId();
-        return createSession(sessionId, userId);
+        AgentSession session = createSession(sessionId, userId);
+        sessionStore.put(session);
+        return session;
     }
 
-    /**
-     * 获取会话（只读，不更新访问时间）
-     */
     public AgentSession getSession(String sessionId) {
-        return sessions.get(sessionId);
+        return sessionStore.get(sessionId);
     }
-
-    // ==================== 消息操作 ====================
 
     public void addUserMessage(String sessionId, String content) {
         AgentSession session = getOrCreateSession(sessionId);
-        session.addMessage(dev.langchain4j.data.message.UserMessage.from(content));
+        ReentrantLock lock = lockOf(sessionId);
+        lock.lock();
+        try {
+            session.addMessage(dev.langchain4j.data.message.UserMessage.from(content));
+            sessionStore.put(session);
+        } finally {
+            lock.unlock();
+        }
     }
 
     public void addAssistantMessage(String sessionId, String content) {
-        AgentSession session = getSession(sessionId);
-        if (session != null) {
+        AgentSession session = sessionStore.get(sessionId);
+        if (session == null) return;
+        ReentrantLock lock = lockOf(sessionId);
+        lock.lock();
+        try {
             session.addMessage(dev.langchain4j.data.message.AiMessage.from(content));
+            sessionStore.put(session);
+        } finally {
+            lock.unlock();
         }
     }
 
-    /**
-     * 获取会话的所有消息
-     */
     public List<ChatMessage> getMessages(String sessionId) {
-        AgentSession session = getSession(sessionId);
-        if (session == null) {
-            return List.of();
-        }
-        return session.getMessages();
+        AgentSession session = sessionStore.get(sessionId);
+        return session == null ? List.of() : session.getMessages();
     }
 
-    /**
-     * 获取最近的 N 条消息
-     */
     public List<ChatMessage> getRecentMessages(String sessionId, int n) {
-        AgentSession session = getSession(sessionId);
-        if (session == null) {
-            return List.of();
-        }
-        return session.getRecentMessages(n);
+        AgentSession session = sessionStore.get(sessionId);
+        return session == null ? List.of() : session.getRecentMessages(n);
     }
 
-    /**
-     * 更新会话上下文
-     */
     public void updateContext(String sessionId, String key, Object value) {
-        AgentSession session = getSession(sessionId);
+        AgentSession session = sessionStore.get(sessionId);
         if (session != null) {
             session.updateContext(key, value);
+            sessionStore.put(session);
         }
     }
 
-    /**
-     * 获取会话上下文
-     */
     public Map<String, Object> getContext(String sessionId) {
-        AgentSession session = getSession(sessionId);
-        if (session == null) {
-            return Map.of();
-        }
-        return session.getContext();
+        AgentSession session = sessionStore.get(sessionId);
+        return session == null ? Map.of() : session.getContext();
     }
 
-    /**
-     * 删除会话
-     */
     public void deleteSession(String sessionId) {
-        AgentSession removed = sessions.remove(sessionId);
-        if (removed != null) {
-            log.info("🗑️ 删除会话: sessionId={}", sessionId);
+        ReentrantLock lock = lockOf(sessionId);
+        lock.lock();
+        try {
+            sessionStore.remove(sessionId);
+            sessionLocks.remove(sessionId);
+            log.info("删除会话: sessionId={}", sessionId);
+        } finally {
+            lock.unlock();
         }
     }
 
-    /**
-     * 清理所有会话（清空）
-     */
     public void clearAllSessions() {
-        int count = sessions.size();
-        sessions.clear();
-        log.info("🗑️ 清空所有会话，共 {}", count);
+        int count = sessionStore.size();
+        sessionStore.clearAll();
+        sessionLocks.clear();
+        log.info("清空所有会话，共 {}", count);
     }
 
-    //endregion
-
-    //region 统计方法
-
-    /**
-     * 获取活跃会话数
-     */
     public int getActiveSessionCount() {
-        return sessions.size();
+        return sessionStore.size();
     }
 
-    /**
-     * 获取会话数
-     */
     public int getTotalSessionCount() {
-        return sessions.size();
+        return sessionStore.size();
     }
 
-    /**
-     * 获取所有会话 ID
-     */
     public List<String> getAllSessionIds() {
-        return List.copyOf(sessions.keySet());
+        return List.copyOf(sessionStore.getAllSessionIds());
     }
 
-    //endregion
-
-    //region 后台清理
-
-    /**
-     * 定时清理过期会话（每 5 分钟执行一次）
-     */
     @Scheduled(fixedDelay = 300000)
     public void cleanExpiredSessions() {
-        List<String> expiredIds = sessions.entrySet().stream()
-                .filter(entry -> entry.getValue().isExpired())
-                .map(Map.Entry::getKey)
+        List<String> expired = sessionStore.getAllSessionIds().stream()
+                .filter(id -> {
+                    AgentSession s = sessionStore.get(id);
+                    return s != null && s.isExpired();
+                })
                 .toList();
-
-        if (!expiredIds.isEmpty()) {
-            expiredIds.forEach(sessions::remove);
-            log.info("🧹 清理过期会话: {} 个", expiredIds.size());
+        if (!expired.isEmpty()) {
+            expired.forEach(this::deleteSession);
+            log.info("清理过期会话: {} 个", expired.size());
         }
     }
 
-    //endregion
-
-    //region 辅助方法
+    /**
+     * 替换指定会话的 ChatMemory（用于压缩后更新上下文）。
+     */
+    public void replaceSessionMemory(String sessionId, List<ChatMessage> messages) {
+        AgentSession session = sessionStore.get(sessionId);
+        if (session != null) {
+            ReentrantLock lock = lockOf(sessionId);
+            lock.lock();
+            try {
+                session.replaceChatMemory(messages);
+                sessionStore.put(session);
+                log.info("会话 {} 的 ChatMemory 已被压缩替换，新消息数: {}", sessionId, messages != null ? messages.size() : 0);
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
 
     private String generateSessionId() {
         return "session-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
-    /**
-     * 设置系统提示词（仅供非 AiServices 调用链使用）
-     */
-    public void setSystemPrompt(String prompt) {
-        this.systemPrompt = prompt;
-        log.info("更新系统提示词");
-    }
-
-    //endregion
 }
