@@ -49,7 +49,7 @@ public class AgentTools {
      */
     private String checkToolCall(String toolName) {
         String sessionId = ToolCallGuard.getCurrentSession();
-        if (sessionId != null && !toolCallGuard.tryAcquire(sessionId)) {
+        if (sessionId != null && !toolCallGuard.tryAcquire(sessionId,toolName)) {
             log.warn("工具 {} 被 ToolCallGuard 拦截（会话 {} 已达上限）", toolName, sessionId);
             return TOOL_LIMIT_MESSAGE;
         }

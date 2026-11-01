@@ -1,9 +1,15 @@
 package com.example.aiagentdemo.service;
 
 import com.example.aiagentdemo.data.EvaluationResult;
+import com.example.aiagentdemo.data.execeptions.ModelCircuitOpenException;
+import com.example.aiagentdemo.data.execeptions.ModelUnavailableException;
+import com.example.aiagentdemo.enums.CallType;
 import com.example.aiagentdemo.model.DeepSeekModel;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -40,12 +46,22 @@ public class SelfEvaluationService {
         String prompt = buildEvaluationPrompt(content, context);
 
         try {
-            String response = deepSeekModel.chat(prompt);
-            log.debug("评估响应: {}", response);
-            return parseEvaluation(response);
+            ChatRequest request = ChatRequest.builder()
+                    .messages(List.of(UserMessage.from(prompt)))
+                    .build();
+            ChatResponse response = deepSeekModel.doChat(request, CallType.EVALUATION, null);
+            String text = response.aiMessage() != null ? response.aiMessage().text() : null;
+            log.debug("评估响应长度: {}", text != null ? text.length() : 0);
+            return parseEvaluation(text);
+        } catch (ModelCircuitOpenException e) {
+            log.warn("评估熔断打开，返回保守默认结果: {}", e.getMessage());
+            return fallbackResult("评估服务熔断，返回保守默认结果");
+        } catch (ModelUnavailableException e) {
+            log.warn("评估模型不可用，返回保守默认结果: {}", e.getMessage());
+            return fallbackResult("评估模型不可用：" + e.getMessage());
         } catch (Exception e) {
             log.error("评估失败", e);
-            return fallbackResult("评估服务异常或返回内容无法解析：" + e.getMessage());
+            return fallbackResult("评估服务异常：" + e.getMessage());
         }
     }
 

@@ -2,6 +2,10 @@ package com.example.aiagentdemo.model;
 
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import com.example.aiagentdemo.data.execeptions.ModelCircuitOpenException;
+import com.example.aiagentdemo.data.execeptions.ModelUnavailableException;
+import com.example.aiagentdemo.enums.CallType;
+import com.example.aiagentdemo.recorder.TokenUsageRecorder;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.*;
@@ -11,6 +15,9 @@ import dev.langchain4j.model.chat.request.json.*;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.ChatResponseMetadata;
 import dev.langchain4j.model.output.FinishReason;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
 import org.springframework.util.StringUtils;
@@ -28,6 +35,7 @@ import java.util.List;
 @Slf4j
 public class DeepSeekModel implements ChatModel {
     private static final String DEFAULT_API_URL = "https://api.deepseek.com/chat/completions";
+    private static final int MAX_RETRIES = 2;
 
     private final String apiUrl;
     private final String apiKey;
@@ -35,6 +43,8 @@ public class DeepSeekModel implements ChatModel {
     private final boolean enableThinking;
     private final String reasoningEffort;
     private final OkHttpClient httpClient;
+    private final CircuitBreaker circuitBreaker;
+    private final TokenUsageRecorder tokenUsageRecorder;
 
     private DeepSeekModel(Builder builder) {
         this.apiUrl = StringUtils.hasText(builder.apiUrl) ? builder.apiUrl : DEFAULT_API_URL;
@@ -42,6 +52,7 @@ public class DeepSeekModel implements ChatModel {
         this.modelName = StringUtils.hasText(builder.modelName) ? builder.modelName : "deepseek-flash";
         this.enableThinking = builder.enableThinking;
         this.reasoningEffort = StringUtils.hasText(builder.reasoningEffort) ? builder.reasoningEffort : "medium";
+        this.tokenUsageRecorder = builder.tokenUsageRecorder;
 
         if (!StringUtils.hasText(apiKey)) {
             throw new IllegalStateException("DeepSeek API Key is required");
@@ -54,6 +65,17 @@ public class DeepSeekModel implements ChatModel {
                 .retryOnConnectionFailure(true)
                 .build();
 
+        // 熔断器：按 modelName 隔离
+        CircuitBreakerConfig cbConfig = CircuitBreakerConfig.custom()
+                .failureRateThreshold(50)
+                .slidingWindowSize(10)
+                .minimumNumberOfCalls(5)
+                .waitDurationInOpenState(Duration.ofSeconds(30))
+                .permittedNumberOfCallsInHalfOpenState(3)
+                .build();
+        CircuitBreakerRegistry registry = CircuitBreakerRegistry.of(cbConfig);
+        this.circuitBreaker = registry.circuitBreaker("deepseek-" + modelName);
+
         log.info("DeepSeekModel initialized: model={}, thinking={}", modelName, enableThinking);
     }
 
@@ -63,11 +85,69 @@ public class DeepSeekModel implements ChatModel {
 
     @Override
     public ChatResponse doChat(ChatRequest request) {
+        return doChat(request, CallType.MAIN_CHAT, null);
+    }
+
+    /**
+     * 带调用类型和会话 ID 的入口。sessionId 用于 token 统计维度，可为 null。
+     */
+    public ChatResponse doChat(ChatRequest request, CallType callType, String sessionId) {
+        if (circuitBreaker.getState() == CircuitBreaker.State.OPEN) {
+            throw new ModelCircuitOpenException(
+                    "DeepSeek circuit breaker is OPEN for model " + modelName);
+        }
+
+        return circuitBreaker.executeSupplier(() -> doChatWithRetry(request, callType, sessionId));
+    }
+
+
+    public ChatResponse doChatWithRetry(ChatRequest request, CallType callType, String sessionId) {
+        IOException lastException = null;
+
+        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            if (attempt > 0) {
+                long backoffMs = 1000L * attempt;
+                log.warn("DeepSeek retry {}/{}, backoff {}ms", attempt, MAX_RETRIES, backoffMs);
+                try {
+                    Thread.sleep(backoffMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new ModelUnavailableException("Interrupted during retry backoff", e);
+                }
+            }
+
+            try {
+                return doChatOnce(request, callType, sessionId);
+            } catch (RetryableException e) {
+                lastException = e;
+            }
+
+        }
+
+        throw new ModelUnavailableException(
+                "DeepSeek call failed after " + MAX_RETRIES + " retries", lastException);
+    }
+
+    /**
+     * 可重试异常：网络错误、HTTP 5xx、超时。
+     */
+    private static class RetryableException extends IOException {
+        RetryableException(String message) { super(message); }
+        RetryableException(String message, Throwable cause) { super(message, cause); }
+    }
+
+
+    // ================================================================
+    // 单次调用
+    // ================================================================
+
+    private ChatResponse doChatOnce(ChatRequest request, CallType callType, String sessionId) throws RetryableException {
+
         try {
             JSONObject root = new JSONObject();
             root.put("model", modelName);
 
-            // ============ 1. 序列化 messages ============
+            // 1. messages
             JSONArray messages = new JSONArray();
             for (ChatMessage msg : request.messages()) {
                 JSONObject serialized = serializeMessage(msg);
@@ -77,7 +157,7 @@ public class DeepSeekModel implements ChatModel {
             }
             root.put("messages", messages);
 
-            // ============ 2. 序列化 tools ============
+            // 2. tools
             if (request.toolSpecifications() != null && !request.toolSpecifications().isEmpty()) {
                 JSONArray tools = new JSONArray();
                 for (ToolSpecification spec : request.toolSpecifications()) {
@@ -85,10 +165,9 @@ public class DeepSeekModel implements ChatModel {
                 }
                 root.put("tools", tools);
                 root.put("tool_choice", "auto");
-                log.debug("已注册 {} 个工具到请求", tools.size());
             }
 
-            // ============ 3. thinking 模式 ============
+            // 3. thinking
             if (enableThinking) {
                 JSONObject thinking = new JSONObject();
                 thinking.put("type", "enabled");
@@ -97,13 +176,21 @@ public class DeepSeekModel implements ChatModel {
             }
 
             root.put("stream", false);
-            root.put("max_tokens", 8192);
+            root.put("max_tokens", callType.getMaxTokens());
 
             if (log.isDebugEnabled()) {
-                log.debug("DeepSeek request: {}", root.toJSONString());
+                log.debug("DeepSeek request: model={}, messages={}, tools={}, maxTokens={}, callType={}",
+                        modelName, messages.size(),
+                        request.toolSpecifications() != null ? request.toolSpecifications().size() : 0,
+                        callType.getMaxTokens(), callType);
             }
 
-            // ============ 4. 发请求 ============
+            // 4. HTTP 请求，按 CallType 设置 callTimeout
+            OkHttpClient clientWithTimeout = httpClient.newBuilder()
+                    .callTimeout(Duration.ofSeconds(callType.getTimeoutSeconds()))
+                    .readTimeout(Duration.ofSeconds(callType.getTimeoutSeconds()))
+                    .build();
+
             Request httpRequest = new Request.Builder()
                     .url(apiUrl)
                     .post(RequestBody.create(
@@ -117,6 +204,9 @@ public class DeepSeekModel implements ChatModel {
             try (Response response = httpClient.newCall(httpRequest).execute()) {
                 String responseBody = response.body() != null ? response.body().string() : "";
 
+                if (response.code() >= 500) {
+                    throw new RetryableException("HTTP " + response.code() + " (server error)");
+                }
                 if (!response.isSuccessful()) {
                     throw new IOException("HTTP " + response.code() + ": " + responseBody);
                 }
@@ -134,26 +224,42 @@ public class DeepSeekModel implements ChatModel {
 
                 JSONArray choices = json.getJSONArray("choices");
                 if (choices == null || choices.isEmpty()) {
-                    throw new IOException("Empty choices in response");
+                    throw new ModelUnavailableException("Empty choices in response");
                 }
+
+                // 5. token 统计
+                recordTokenUsage(json, callType, sessionId);
 
                 JSONObject choice = choices.getJSONObject(0);
                 JSONObject message = choice.getJSONObject("message");
 
-                // ============ 5. 解析响应 ============
                 return parseResponse(message, choice);
+            }catch (java.net.SocketTimeoutException e) {
+                throw new RetryableException("Request timeout after " + callType.getTimeoutSeconds() + "s", e);
+            } catch (IOException e) {
+                throw new RetryableException("Network error: " + e.getMessage(), e);
             }
 
+        } catch (ModelUnavailableException e) {
+            throw e;   // 不可重试的业务异常，直接抛
+        } catch (RetryableException e) {
+            throw e;
         } catch (Exception e) {
-            log.error("DeepSeek chat error", e);
-            return ChatResponse.builder()
-                    .aiMessage(new AiMessage("[系统提示] 模型暂时不可用: " + e.getMessage()))
-                    .metadata(ChatResponseMetadata.builder()
-                            .modelName(modelName)
-                            .finishReason(FinishReason.STOP)
-                            .build())
-                    .build();
+            throw new ModelUnavailableException("Unexpected error during DeepSeek call", e);
         }
+    }
+
+    // ================================================================
+    // Token 统计
+    // ================================================================
+
+    private void recordTokenUsage(JSONObject json, CallType callType, String sessionId) {
+        if (tokenUsageRecorder == null) return;
+        JSONObject usage = json.getJSONObject("usage");
+        if (usage == null) return;
+        int input = usage.getIntValue("prompt_tokens", 0);
+        int output = usage.getIntValue("completion_tokens", 0);
+        tokenUsageRecorder.record(sessionId, modelName, callType, input, output);
     }
 
     // ================================================================
@@ -323,22 +429,16 @@ public class DeepSeekModel implements ChatModel {
             List<ToolExecutionRequest> requests = new ArrayList<>();
             for (int i = 0; i < toolCalls.size(); i++) {
                 JSONObject tc = toolCalls.getJSONObject(i);
-                String id = tc.getString("id");
                 JSONObject func = tc.getJSONObject("function");
-                String name = func.getString("name");
-                String arguments = func.getString("arguments");
-
                 requests.add(ToolExecutionRequest.builder()
-                        .id(id)
-                        .name(name)
-                        .arguments(arguments)
+                        .id(tc.getString("id"))
+                        .name(func.getString("name"))
+                        .arguments(func.getString("arguments"))
                         .build());
             }
 
-            AiMessage aiMessage = AiMessage.from(requests);
-
             return ChatResponse.builder()
-                    .aiMessage(aiMessage)
+                    .aiMessage(AiMessage.from(requests))
                     .metadata(ChatResponseMetadata.builder()
                             .modelName(modelName)
                             .finishReason(FinishReason.TOOL_EXECUTION)
@@ -361,6 +461,11 @@ public class DeepSeekModel implements ChatModel {
                 .build();
     }
 
+    private static String truncate(String s, int max) {
+        if (s == null) return "";
+        return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
     // ================================================================
     // Builder
     // ================================================================
@@ -375,6 +480,7 @@ public class DeepSeekModel implements ChatModel {
         private String modelName;
         private boolean enableThinking = false;
         private String reasoningEffort = "medium";
+        private TokenUsageRecorder tokenUsageRecorder;
 
         public Builder apiUrl(String apiUrl) {
             this.apiUrl = apiUrl;
@@ -398,6 +504,11 @@ public class DeepSeekModel implements ChatModel {
 
         public Builder reasoningEffort(String reasoningEffort) {
             this.reasoningEffort = reasoningEffort;
+            return this;
+        }
+
+        public Builder tokenUsageRecorder(TokenUsageRecorder recorder) {
+            this.tokenUsageRecorder = recorder;
             return this;
         }
 

@@ -120,7 +120,7 @@ public class CodeAgentLoopService {
         List<Object> activeTools = toolPlugins.stream()
                 .filter(p -> p.getDomainName().equals(domainConfig.getName()))
                 .flatMap(p -> p.getToolBeans().stream())
-                .collect(Collectors.toList());
+                .toList();
 
         if (activeTools.isEmpty()) {
             throw new IllegalStateException(

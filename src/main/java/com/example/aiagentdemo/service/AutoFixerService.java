@@ -2,11 +2,19 @@ package com.example.aiagentdemo.service;
 
 import com.example.aiagentdemo.data.AutoFixResult;
 import com.example.aiagentdemo.data.EvaluationResult;
+import com.example.aiagentdemo.data.execeptions.ModelCircuitOpenException;
+import com.example.aiagentdemo.data.execeptions.ModelUnavailableException;
+import com.example.aiagentdemo.enums.CallType;
 import com.example.aiagentdemo.model.DeepSeekModel;
+import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
 
 @Slf4j
 @Service
@@ -35,15 +43,39 @@ public class AutoFixerService {
             attempt++;
             log.info("修正尝试 {}/{}", attempt, MAX_FIX_ATTEMPTS);
 
-            // 1. 生成修正方案
-            String fixPrompt = buildFixPrompt(currentContent, context, currentEvaluation);
-            String fixedContent = deepSeekModel.chat(fixPrompt);
+            String fixedContent;
+            try {
+                String fixPrompt = buildFixPrompt(currentContent, context, currentEvaluation);
+                ChatRequest request = ChatRequest.builder()
+                        .messages(List.of(UserMessage.from(fixPrompt)))
+                        .build();
+                ChatResponse response = deepSeekModel.doChat(request, CallType.MAIN_CHAT, null);
+                fixedContent = response.aiMessage() != null ? response.aiMessage().text() : null;
+            } catch (ModelCircuitOpenException e) {
+                log.warn("修正熔断打开，放弃本轮修正: {}", e.getMessage());
+                break;
+            } catch (ModelUnavailableException e) {
+                log.warn("修正模型不可用，放弃本轮修正: {}", e.getMessage());
+                break;
+            } catch (Exception e) {
+                log.warn("修正调用异常，放弃本轮修正: {}", e.getMessage());
+                break;
+            }
 
-            // 2. 重新评估
-            currentEvaluation = evaluationService.evaluate(fixedContent, context);
-            currentContent = fixedContent;
+            if (fixedContent == null || fixedContent.isBlank()) {
+                log.warn("修正返回为空，放弃本轮修正");
+                break;
+            }
 
-            log.info("修正后评分: {}/10", currentEvaluation.getOverallScore());
+            try {
+                currentEvaluation = evaluationService.evaluate(fixedContent, context);
+                currentContent = fixedContent;
+                log.info("修正后评分: {}/10", currentEvaluation.getOverallScore());
+            } catch (Exception e) {
+                // evaluate 内部已经降级为 fallbackResult，不会抛到这里；这里只做兜底防御
+                log.warn("重新评估异常，保留当前内容: {}", e.getMessage());
+                break;
+            }
         }
 
         // 生成修正报告
@@ -53,8 +85,8 @@ public class AutoFixerService {
                 .attempts(attempt)
                 .passed(currentEvaluation.isPassed())
                 .message(currentEvaluation.isPassed() ?
-                        "✅ 经过 " + attempt + " 轮修正，质量已达标" :
-                        "⚠️ 经过 " + attempt + " 轮修正，质量仍未达标，建议人工审核")
+                        "经过 " + attempt + " 轮修正，质量已达标" :
+                        "经过 " + attempt + " 轮修正，质量仍未达标，建议人工审核")
                 .build();
     }
 

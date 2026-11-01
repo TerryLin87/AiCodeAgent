@@ -1,5 +1,7 @@
 package com.example.aiagentdemo.service;
 
+import com.example.aiagentdemo.data.execeptions.ModelCircuitOpenException;
+import com.example.aiagentdemo.data.execeptions.ModelUnavailableException;
 import com.example.aiagentdemo.data.subagent.SubAgentResult;
 import com.example.aiagentdemo.instances.subagent.ISubAgent;
 import com.example.aiagentdemo.model.DeepSeekModel;
@@ -84,13 +86,17 @@ public class SubAgentRoutingService {
             if (decision != null) {
                 log.warn("LLM 路由到不存在的 Agent: {}，降级到关键词匹配", decision.agentName());
             }
+        } catch (ModelCircuitOpenException e) {
+            log.warn("LLM 路由熔断打开，直接走关键词兜底: {}", e.getMessage());
+        } catch (ModelUnavailableException e) {
+            log.warn("LLM 路由模型不可用，走关键词兜底: {}", e.getMessage());
         } catch (Exception e) {
             log.warn("LLM 路由失败，降级到关键词匹配: {}", e.getMessage());
         }
 
         // 2. 关键词加权兜底
         RouteDecision fallback = routeByKeywords(task);
-        log.info("🧭 关键词兜底路由 → {}", fallback.agentName());
+        log.info("🧭 关键词兜底路由 → {}（reason: {}）", fallback.agentName(), fallback.reason());
         return fallback;
     }
 

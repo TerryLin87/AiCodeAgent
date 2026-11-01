@@ -1,5 +1,7 @@
 package com.example.aiagentdemo.tools;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -7,6 +9,7 @@ import org.springframework.stereotype.Component;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -16,14 +19,20 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Component
 public class ToolCallGuard {
 
-    /** 单次会话最多允许的工具调用次数 */
+    /** 默认单工具调用上限（可按工具名覆盖） */
     @Value("${agent.tool.max-calls-per-session:15}")
-    private int maxCallsPerSession;
+    private int defaultMaxCalls;
 
-    /** 每个会话的工具调用计数 */
-    private final Map<String, AtomicInteger> counters = new ConcurrentHashMap<>();
+    /** 按工具名覆盖的限额，例如 readFile=5, searchCode=5, delegateToSubAgent=3 */
+    @Value("#{${agent.tool.per-tool-limits:{'readFile':5,'searchCode':5,'delegateToSubAgent':3}}}")
+    private Map<String, Integer> perToolLimits;
 
-    /** 当前线程正在处理的会话 ID（线程内共享，工具方法里读取） */
+    /** key = sessionId + ":" + toolName */
+    private final Cache<String, AtomicInteger> counters = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterAccess(30, TimeUnit.MINUTES)
+            .build();
+
     private static final ThreadLocal<String> CURRENT_SESSION = new ThreadLocal<>();
 
     // ================================================================
@@ -52,15 +61,19 @@ public class ToolCallGuard {
      * @param sessionId 会话 ID
      * @return true 允许；false 已达上限
      */
-    public boolean tryAcquire(String sessionId) {
+    public boolean tryAcquire(String sessionId,String toolName) {
         if (sessionId == null) {
-            return true;   // 拿不到会话 ID 时不阻塞
+            return true;
         }
-        AtomicInteger counter = counters.computeIfAbsent(
-                sessionId, k -> new AtomicInteger(0));
-        int count = counter.incrementAndGet();
-        if (count > maxCallsPerSession) {
-            log.warn("会话 {} 工具调用已达上限 {}，拒绝继续调用", sessionId, maxCallsPerSession);
+
+        int limit = perToolLimits.getOrDefault(toolName, defaultMaxCalls);
+        String key = sessionId + ":" + toolName;
+
+        AtomicInteger counter = counters.get(key, k -> new AtomicInteger(0));
+        int current = counter.getAndUpdate(c -> c < limit ? c + 1 : c);
+
+        if (current >= limit) {
+            log.warn("会话 {} 工具 {} 调用已达上限 {}，拒绝继续调用", sessionId, toolName, limit);
             return false;
         }
         return true;
@@ -70,30 +83,34 @@ public class ToolCallGuard {
      * 重置指定会话的计数（每轮新请求开始前调用）。
      */
     public void reset(String sessionId) {
-        if (sessionId != null) {
-            counters.put(sessionId, new AtomicInteger(0));
-        }
+        if (sessionId == null) return;
+        counters.asMap().keySet().removeIf(k -> k.startsWith(sessionId + ":"));
     }
 
     /**
-     * 清理已结束会话的计数（定时任务）。
+     * 清理已结束会话的计数。Caffeine 已自动过期，这里保留作为显式清理入口。
      */
     public void evict(Set<String> aliveSessionIds) {
-        counters.keySet().removeIf(id -> !aliveSessionIds.contains(id));
+        counters.asMap().keySet().removeIf(key -> {
+            int idx = key.indexOf(':');
+            if (idx < 0) return true;
+            String sessionId = key.substring(0, idx);
+            return !aliveSessionIds.contains(sessionId);
+        });
     }
 
     /**
      * 清空所有计数（reset 应用时调用）。
      */
     public void clearAll() {
-        counters.clear();
+        counters.invalidateAll();
     }
 
     /**
      * 当前计数（调试用）。
      */
-    public int currentCount(String sessionId) {
-        AtomicInteger c = counters.get(sessionId);
+    public int currentCount(String sessionId,String toolName) {
+        AtomicInteger c = counters.getIfPresent(sessionId + ":" + toolName);
         return c == null ? 0 : c.get();
     }
 
@@ -103,9 +120,11 @@ public class ToolCallGuard {
 
     /**
      * 当前被跟踪的会话数（调试用）。
-     * 用于 evictStaleResources 日志，替代无意义的 currentCount("__dummy__")。
      */
     public int getTrackedSessionCount() {
-        return counters.size();
+        return (int) counters.asMap().keySet().stream()
+                .map(k -> k.substring(0, Math.max(0, k.indexOf(':'))))
+                .distinct()
+                .count();
     }
 }

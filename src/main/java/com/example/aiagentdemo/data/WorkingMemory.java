@@ -53,24 +53,26 @@ public class WorkingMemory {
     }
 
     public void markStepCompleted(int order, String result) {
-        if (this.steps != null && order < this.steps.size()) {
-            StepRecord step = this.steps.get(order);
-            step.setStatus(PlanStatus.COMPLETED.getCode());
-            step.setResult(result);
-            step.setTimestamp(LocalDateTime.now());
-            this.completedSteps++;
-            this.lastUpdate = LocalDateTime.now();
+        if (this.steps == null || order < 1 || order > this.steps.size()) {
+            return;
         }
+        StepRecord step = this.steps.get(order - 1);
+        step.setStatus(PlanStatus.COMPLETED.getCode());
+        step.setResult(result);
+        step.setTimestamp(LocalDateTime.now());
+        this.completedSteps++;
+        this.lastUpdate = LocalDateTime.now();
     }
 
     public void markStepFailed(int order, String error) {
-        if (this.steps != null && order < this.steps.size()) {
-            StepRecord step = this.steps.get(order);
-            step.setStatus(PlanStatus.FAILED.getCode());
-            step.setError(error);
-            step.setTimestamp(LocalDateTime.now());
-            this.lastUpdate = LocalDateTime.now();
+        if (this.steps == null || order < 1 || order > this.steps.size()) {
+            return;
         }
+        StepRecord step = this.steps.get(order - 1);
+        step.setStatus(PlanStatus.FAILED.getCode());
+        step.setError(error);
+        step.setTimestamp(LocalDateTime.now());
+        this.lastUpdate = LocalDateTime.now();
     }
 
     public String getCurrentStepDescription() {

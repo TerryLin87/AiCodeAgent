@@ -1,10 +1,13 @@
 package com.example.aiagentdemo.service.subagent;
 
+import com.example.aiagentdemo.enums.CallType;
 import com.example.aiagentdemo.model.DeepSeekModel;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -564,8 +567,12 @@ public class ContextCompressor {
                 """, content);
 
         try {
-            String summary = deepSeekModel.chat(prompt);
-            if (summary.length() > 500) {
+            ChatRequest req = ChatRequest.builder()
+                    .messages(List.of(UserMessage.from(prompt)))
+                    .build();
+            ChatResponse resp = deepSeekModel.doChat(req, CallType.SUMMARY, null);
+            String summary = resp.aiMessage().text();
+            if (summary != null && summary.length() > 500) {
                 summary = summary.substring(0, 500);
             }
             return summary;
