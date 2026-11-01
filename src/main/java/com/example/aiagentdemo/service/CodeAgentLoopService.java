@@ -91,6 +91,9 @@ public class CodeAgentLoopService {
     @Autowired(required = false)
     private McpToolProvider mcpToolProvider;
 
+    @Autowired
+    private UserStateTracker userStateTracker;
+
     // ================================================================
     // 配置项
     // ================================================================
@@ -202,16 +205,27 @@ public class CodeAgentLoopService {
             AgentSession session = sessionManager.getOrCreateSession(sessionId);
             log.info("会话状态: 消息数={}", session.getMessages().size());
 
+            // 1. 上下文压缩检查
             ChatMemory memory = memoryOf(sessionId);
-
-            if (contextCompressor.needsCompression(memory.messages())) {
+            if (contextCompressor.needsCompression(sessionId, memory.messages())) {
                 log.info("触发上下文压缩，压缩前消息数: {}", memory.messages().size());
-                List<ChatMessage> compressed = contextCompressor.compress(memory.messages());
-                // 2. 通过 SessionManager 原子替换并持久化
+                List<ChatMessage> compressed = contextCompressor.compress(sessionId, memory.messages());
+
+                // 交给 SessionManager 进行原子替换
                 sessionManager.replaceSessionMemory(sessionId, compressed);
                 log.info("上下文压缩完成，压缩后消息数: {}", compressed.size());
             }
 
+            // 2. 状态追踪与指代消解
+            userStateTracker.recordState(sessionId, userMessage);
+            String resolvedRef = userStateTracker.resolveReference(sessionId, userMessage);
+            String finalUserMessage = userMessage;
+            if (resolvedRef != null) {
+                finalUserMessage = userMessage + "\n\n[系统提示：用户提到的指代实际是指：'" + resolvedRef + "']";
+                log.info("指代消解成功: {} -> {}", userMessage, resolvedRef);
+            }
+
+            // 3. 复杂任务规划 (Plan)
             if (planSubAgent != null && isComplex(userMessage)) {
                 long planStart = System.currentTimeMillis();
                 try {
@@ -227,14 +241,18 @@ public class CodeAgentLoopService {
                 }
             }
 
+            // 4. 长期记忆检索 (RAG)
             List<MemoryDocument> relevantMemories =
                     longTermMemoryService.retrieveRelevantMemories(userMessage, 3);
             pendingMemoryContext.put(sessionId, formatMemoryContext(relevantMemories));
 
-            String response = assistant.chat(sessionId, userMessage);
+            // 5. 正式调用模型 (带工具执行)
+            String response = assistant.chat(sessionId, finalUserMessage);
 
+            // 6. 反思与自动修正
             response = applyReflexion(sessionId, userMessage, response);
 
+            // 7. 持久化记忆
             sessionManager.addUserMessage(sessionId, userMessage);
             sessionManager.addAssistantMessage(sessionId, response);
             longTermMemoryService.storeMemory(sessionId, "user", userMessage);
@@ -250,7 +268,6 @@ public class CodeAgentLoopService {
         } finally {
             pendingMemoryContext.remove(sessionId);
             pendingPlanContext.remove(sessionId);
-            // ★ 必须清理 ThreadLocal，避免线程池复用时下一个请求读到上一个会话的 sessionId
             ToolCallGuard.clearCurrentSession();
         }
     }
