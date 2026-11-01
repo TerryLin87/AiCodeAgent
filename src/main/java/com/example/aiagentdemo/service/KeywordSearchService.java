@@ -1,7 +1,9 @@
 package com.example.aiagentdemo.service;
 
 import com.example.aiagentdemo.data.RetrievedCode;
+import com.example.aiagentdemo.utils.DegradationLogger;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
@@ -20,6 +22,7 @@ import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -33,6 +36,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @Slf4j
 @Service
 public class KeywordSearchService {
+
+    @Autowired
+    private DegradationLogger degradationLogger;
 
     // Milvus / Lucene 单次返回上限保护
     private static final int MAX_TOP_K = 1000;
@@ -143,7 +149,21 @@ public class KeywordSearchService {
             return results;
         } catch (Exception e) {
             log.error("关键词检索失败: query={}", query, e);
+            degradationLogger.log("Lucene", "search exception: " + e.getMessage());
             return new ArrayList<>();
+        }
+    }
+
+    @PreDestroy
+    public void destroy() {
+        log.info("Shutting down KeywordSearchService, closing Lucene resources");
+        closeReaderQuietly();
+        if (directory != null) {
+            try {
+                directory.close();
+            } catch (IOException e) {
+                log.error("Failed to close Lucene directory", e);
+            }
         }
     }
 
@@ -168,4 +188,6 @@ public class KeywordSearchService {
             doc.add(new TextField(field, value, Field.Store.NO));
         }
     }
+
+    public boolean isIndexReady() { return searcher != null; }
 }

@@ -18,6 +18,7 @@ import dev.langchain4j.model.output.FinishReason;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
 import org.springframework.util.StringUtils;
@@ -126,6 +127,15 @@ public class DeepSeekModel implements ChatModel {
 
         throw new ModelUnavailableException(
                 "DeepSeek call failed after " + MAX_RETRIES + " retries", lastException);
+    }
+
+    @PreDestroy
+    public void destroy() {
+        log.info("Shutting down DeepSeekModel, releasing HTTP connections");
+        if (httpClient != null) {
+            httpClient.dispatcher().executorService().shutdown();
+            httpClient.connectionPool().evictAll();
+        }
     }
 
     /**

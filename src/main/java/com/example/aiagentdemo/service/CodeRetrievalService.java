@@ -2,6 +2,7 @@ package com.example.aiagentdemo.service;
 
 import com.example.aiagentdemo.data.RetrievalResult;
 import com.example.aiagentdemo.data.RetrievedCode;
+import com.example.aiagentdemo.utils.DegradationLogger;
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
@@ -12,6 +13,7 @@ import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.filter.Filter;
 import dev.langchain4j.store.embedding.filter.MetadataFilterBuilder;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.GetCollectionStatisticsResponse;
 import io.milvus.param.R;
@@ -63,6 +65,9 @@ public class CodeRetrievalService {
     // 运行时探测到的向量维度，-1 表示尚未探测
     private volatile int dimension = -1;
 
+    @Autowired
+    private DegradationLogger degradationLogger;
+
     /**
      * 根据需求检索相似代码。
      */
@@ -72,10 +77,21 @@ public class CodeRetrievalService {
 
     /**
      * 根据需求检索相似代码，可按项目过滤。
+     *
+     * 引入熔断机制：
+     * 1. 如果 Milvus 正常，走核心逻辑。
+     * 2. 如果 Milvus 连续失败触发了熔断（Open 状态），直接走 searchFallback。
      */
+    @CircuitBreaker(name = "milvus", fallbackMethod = "searchFallback")
     public List<RetrievedCode> search(String query, int maxResults, String projectName, Double minScore) {
         log.info("检索: query={}, project={}, maxResults={}", query, projectName, maxResults);
+        return doSearch(query, maxResults, projectName, minScore);
+    }
 
+    /**
+     * 根据需求检索相似代码，可按项目过滤。
+     */
+    private List<RetrievedCode> doSearch(String query, int maxResults, String projectName, Double minScore) {
         try {
             // 将查询文本向量化
             var queryEmbedding = embeddingModel.embed(query).content();
@@ -123,6 +139,15 @@ public class CodeRetrievalService {
             log.error("检索失败", e);
             return List.of();
         }
+    }
+
+    /**
+     * search 方法的降级逻辑。
+     * 方法签名必须与原方法一致，最后多加一个 Throwable 参数。
+     */
+    public List<RetrievedCode> searchFallback(String query, int maxResults, String projectName, Double minScore, Throwable t) {
+        degradationLogger.log("Milvus", "search degraded, reason: " + t.getMessage());
+        return List.of();
     }
 
     /**

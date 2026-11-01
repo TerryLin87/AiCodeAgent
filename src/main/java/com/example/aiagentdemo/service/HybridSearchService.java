@@ -1,6 +1,7 @@
 package com.example.aiagentdemo.service;
 
 import com.example.aiagentdemo.data.RetrievedCode;
+import com.example.aiagentdemo.utils.DegradationLogger;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,6 +18,9 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 public class HybridSearchService {
+    @Autowired
+    private DegradationLogger degradationLogger;
+
     @Autowired
     @Lazy
     private CodeRetrievalService semanticSearchService;
@@ -50,6 +54,10 @@ public class HybridSearchService {
 
         // 2. 关键词检索
         List<RetrievedCode> keywordResults = keywordSearchService.search(query, recallSize);
+
+        if (keywordResults.isEmpty()) {
+            degradationLogger.log("HybridSearch", "keyword results empty, fallback to pure semantic");
+        }
 
         // 3. 按项目过滤（如果指定）
         if (projectName != null && !projectName.isEmpty()) {

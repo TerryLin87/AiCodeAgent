@@ -19,6 +19,7 @@ import dev.langchain4j.service.AiServices;
 import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.UserMessage;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -102,6 +103,8 @@ public class CodeAgentLoopService {
 
     @Value("${agent.reflexion.max-duration-ms:30000}")
     private long reflexionMaxDurationMs;
+
+    private volatile boolean shuttingDown = false;
 
     // ================================================================
     // Assistant
@@ -364,6 +367,12 @@ public class CodeAgentLoopService {
         }
 
         return sb.toString();
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        this.shuttingDown = true;
+        log.info("CodeAgentLoopService marked as shutting down");
     }
 
     @Scheduled(fixedDelay = 300_000, initialDelay = 300_000)
