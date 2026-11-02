@@ -70,10 +70,11 @@ public class ToolCallGuard {
         String key = sessionId + ":" + toolName;
 
         AtomicInteger counter = counters.get(key, k -> new AtomicInteger(0));
-        int current = counter.getAndUpdate(c -> c < limit ? c + 1 : c);
+        int current = counter.incrementAndGet();
 
         if (current >= limit) {
             log.warn("会话 {} 工具 {} 调用已达上限 {}，拒绝继续调用", sessionId, toolName, limit);
+            counter.decrementAndGet();
             return false;
         }
         return true;

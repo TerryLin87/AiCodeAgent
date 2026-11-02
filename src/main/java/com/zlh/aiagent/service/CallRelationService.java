@@ -88,33 +88,7 @@ public class CallRelationService {
                     .filter(r -> projectName == null || projectName.isEmpty()
                             || projectName.equals(r.getCalleeProject()))
                     .distinct()
-                    .collect(Collectors.toUnmodifiableList());
-        } finally {
-            lock.readLock().unlock();
-        }
-    }
-
-    public List<CallRelation> findCallees(String className, String methodName) {
-        return findCallees(null, className, methodName);
-    }
-
-    public List<CallRelation> findCallees(String projectName, String className, String methodName) {
-        lock.readLock().lock();
-        try {
-            String key = buildMethodKey(projectName, className, methodName);
-            List<CallRelation> exact = callerIndex.get(key);
-            if (exact != null && !exact.isEmpty()) {
-                return List.copyOf(exact);
-            }
-
-            String classMethodKey = className + "." + methodName;
-            return callerIndex.entrySet().stream()
-                    .filter(entry -> entry.getKey().contains(classMethodKey))
-                    .flatMap(entry -> entry.getValue().stream())
-                    .filter(r -> projectName == null || projectName.isEmpty()
-                            || projectName.equals(r.getCallerProject()))
-                    .distinct()
-                    .collect(Collectors.toUnmodifiableList());
+                    .toList();
         } finally {
             lock.readLock().unlock();
         }
