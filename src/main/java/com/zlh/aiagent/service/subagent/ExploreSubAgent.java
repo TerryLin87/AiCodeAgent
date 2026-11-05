@@ -155,9 +155,12 @@ public class ExploreSubAgent implements ISubAgent {
      * 解析任务意图（规则实现，阶段 0 Day3-4 可升级为 LLM 结构化解析）。
      */
     private TaskIntent parseTaskIntent(String task, Map<String, Object> context) {
+        // 入参归一：接口允许 context 为 null，内部统一用空 Map，避免散落的 NPE
+        Map<String, Object> ctx = (context != null) ? context : Map.of();
+
         String lower = task.toLowerCase();
         TaskIntent intent = new TaskIntent();
-        intent.setContext(context);
+        intent.setContext(ctx);
 
         String pathInTask = extractPath(task);
 
@@ -167,11 +170,11 @@ public class ExploreSubAgent implements ISubAgent {
         } else if (lower.contains("读取") || lower.contains("查看文件") || lower.contains("打开")
                 || !pathInTask.isEmpty()) {
             intent.setType("read_file");
-            intent.setPath((String) context.getOrDefault("path", pathInTask));
+            intent.setPath((String) ctx.getOrDefault("path", pathInTask));
         } else if (lower.contains("结构") || lower.contains("目录")) {
             intent.setType("structure");
             // 修复：原来误用 extractPath(task) 取项目名
-            intent.setProject((String) context.getOrDefault("projectName", extractProject(task)));
+            intent.setProject((String) ctx.getOrDefault("projectName", extractProject(task)));
         } else if (lower.contains("调用") || lower.contains("依赖")) {
             intent.setType("callers");
             String[] parts = extractClassAndMethod(task);

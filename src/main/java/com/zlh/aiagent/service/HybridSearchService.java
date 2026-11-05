@@ -1,5 +1,6 @@
 package com.zlh.aiagent.service;
 
+import com.zlh.aiagent.config.DomainConfig;
 import com.zlh.aiagent.data.RetrievedCode;
 import com.zlh.aiagent.utils.DegradationLogger;
 import lombok.extern.slf4j.Slf4j;
@@ -28,6 +29,9 @@ public class HybridSearchService {
     @Autowired
     private KeywordSearchService keywordSearchService;
 
+    @Autowired
+    private DomainConfig domainConfig;
+
     @Value("${search.hybrid.semantic-weight:0.6}")
     private double semanticWeight;
 
@@ -38,19 +42,20 @@ public class HybridSearchService {
      * 混合检索（语义 + 关键词）
      */
     public List<RetrievedCode> hybridSearch(String query, int topK) {
-        return hybridSearch(query, topK, null, 0.3);
+        return hybridSearch(query, topK, null, defaultMinScore());
     }
 
     /**
      * 混合检索（带过滤）
      */
     public List<RetrievedCode> hybridSearch(String query, int topK, String projectName, Double minScore) {
+        double effectiveMinScore = minScore != null ? minScore : defaultMinScore();
         log.info("混合检索: query={}, project={}, topK={}", query, projectName, topK);
 
         int recallSize = topK * 3;  // 召回更多候选
 
         // 1. 语义检索
-        List<RetrievedCode> semanticResults = semanticSearchService.search(query, recallSize, projectName, minScore);
+        List<RetrievedCode> semanticResults = semanticSearchService.search(query, recallSize, projectName, effectiveMinScore);
 
         // 2. 关键词检索
         List<RetrievedCode> keywordResults = keywordSearchService.search(query, recallSize);
@@ -124,5 +129,12 @@ public class HybridSearchService {
             keywordSearchService.buildIndex(allCode);
             log.info("关键词索引构建完成，共 {} 条记录", allCode.size());
         }
+    }
+
+    private double defaultMinScore() {
+        if (domainConfig != null && domainConfig.getRetrievalMinScore() > 0) {
+            return domainConfig.getRetrievalMinScore();
+        }
+        return 0.3;
     }
 }

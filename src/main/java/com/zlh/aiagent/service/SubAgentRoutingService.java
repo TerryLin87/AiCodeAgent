@@ -1,5 +1,6 @@
 package com.zlh.aiagent.service;
 
+import com.zlh.aiagent.config.DomainConfig;
 import com.zlh.aiagent.data.execeptions.ModelCircuitOpenException;
 import com.zlh.aiagent.data.execeptions.ModelUnavailableException;
 import com.zlh.aiagent.data.subagent.SubAgentResult;
@@ -26,8 +27,9 @@ import java.util.stream.Collectors;
 /**
  * 子 Agent 路由器。
  *
- * <p>取代原来 SubAgentScheduler.delegateAuto() 里的 HashMap 遍历 + 关键词 contains 匹配，
- * 采用"能力声明 + LLM 结构化输出 + 确定性兜底"三级路由：
+ * <p>路由策略：LLM 优先，关键词兜底。
+ *
+ * <p>默认 Agent 从 {@link DomainConfig#getDefaultAgent()} 读取，不再硬编码 "explore"。
  */
 @Slf4j
 @Service
@@ -40,6 +42,9 @@ public class SubAgentRoutingService {
     @Autowired
     private List<ISubAgent> allAgents;
 
+    @Autowired
+    private DomainConfig domainConfig;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /** 路由结果：选中的 Agent + 重写后的子任务 + 选型理由 */
@@ -47,25 +52,58 @@ public class SubAgentRoutingService {
 
     /** LLM 输出的缓存（不需要每次都重建） */
     private String routingPrompt;
-    /** 强信号关键词 → 对应的 agent 名（从各子 Agent 动态收集） */
+
+    /** 关键词 → agent 名（子 Agent 声明为主，yml 补充为辅） */
     private final Map<String, String> strongKeywords = new LinkedHashMap<>();
+
     private Map<String, ISubAgent> agentIndex;
 
     @PostConstruct
     public void init() {
         agentIndex = allAgents.stream()
                 .collect(Collectors.toMap(ISubAgent::getName, a -> a, (a, b) -> a, LinkedHashMap::new));
-        //从各子 Agent 动态收集路由关键词
+
+        // 1. 主来源：各子 Agent 自己声明的关键词
         for (ISubAgent agent : allAgents) {
-            for (String keyword : agent.getRoutingKeywords()) {
+            List<String> keywords = agent.getRoutingKeywords();
+            if (keywords == null) {
+                continue;
+            }
+            for (String keyword : keywords) {
                 strongKeywords.put(keyword, agent.getName());
+            }
+        }
+        int fromAgents = strongKeywords.size();
+
+        // 2. 补充来源：DomainConfig 中 routing-keywords（只补，不覆盖）
+        Map<String, String> extra = domainConfig == null ? null : domainConfig.getRoutingKeywords();
+        int fromYml = 0;
+        if (extra != null && !extra.isEmpty()) {
+            for (Map.Entry<String, String> e : extra.entrySet()) {
+                String keyword = e.getKey();
+                String agentName = e.getValue();
+                if (keyword == null || keyword.isBlank() || agentName == null || agentName.isBlank()) {
+                    continue;
+                }
+                if (!agentIndex.containsKey(agentName)) {
+                    log.warn("routing-keywords 指向不存在的 agent: '{}' -> '{}'，已忽略", keyword, agentName);
+                    continue;
+                }
+                // 子 Agent 已声明的不覆盖
+                if (strongKeywords.putIfAbsent(keyword, agentName) == null) {
+                    fromYml++;
+                }
             }
         }
 
         routingPrompt = buildRoutingPrompt();
-        log.info("SubAgentRoutingService 初始化完成，注册 Agent: {}，路由关键词数: {}",
-                agentIndex.keySet(), strongKeywords.size());
+        log.info("SubAgentRoutingService 初始化完成: agents={}, keywords={}（子Agent={}, yml补充={}）, defaultAgent={}",
+                agentIndex.keySet(), strongKeywords.size(), fromAgents, fromYml, defaultAgentName());
     }
+
+    // ================================================================
+    // 主入口
+    // ================================================================
 
     /**
      * 主入口：给定任务，返回路由决策。
@@ -73,7 +111,7 @@ public class SubAgentRoutingService {
      */
     public RouteDecision route(String task) {
         if (task == null || task.isBlank()) {
-            return new RouteDecision("explore", task, "空任务默认 explore", false);
+            return new RouteDecision(defaultAgentName(), task, "空任务默认 " + defaultAgentName(), false);
         }
 
         // 1. 尝试 LLM 路由
@@ -94,21 +132,25 @@ public class SubAgentRoutingService {
             log.warn("LLM 路由失败，降级到关键词匹配: {}", e.getMessage());
         }
 
-        // 2. 关键词加权兜底
+        // 2. 关键词兜底
         RouteDecision fallback = routeByKeywords(task);
         log.info("🧭 关键词兜底路由 → {}（reason: {}）", fallback.agentName(), fallback.reason());
         return fallback;
     }
 
     /**
-     * 便捷方法：直接执行路由后的 Agent（供 SubAgentScheduler.delegateAuto 调用）。
+     * 便捷方法：直接执行路由后的 Agent。
      */
     public SubAgentResult routeAndExecute(String task, Map<String, Object> context) {
         RouteDecision decision = route(task);
         ISubAgent target = agentIndex.get(decision.agentName());
         if (target == null) {
-            target = agentIndex.get("explore");
-            decision = new RouteDecision("explore", task, "兜底", false);
+            String fallbackName = defaultAgentName();
+            target = agentIndex.get(fallbackName);
+            decision = new RouteDecision(fallbackName, task, "兜底", false);
+        }
+        if (target == null) {
+            return SubAgentResult.failure("无可用子 Agent", 0);
         }
         String finalTask = decision.rewrittenTask() != null ? decision.rewrittenTask() : task;
         log.info("开始执行子 Agent [{}]，任务: {}", decision.agentName(), truncate(finalTask, 120));
@@ -178,7 +220,7 @@ public class SubAgentRoutingService {
         sb.append("1. 验证/检查/评审类任务选 verify；\n");
         sb.append("2. 复杂任务拆解/重构方案/多步骤实现选 plan；\n");
         sb.append("3. 搜索代码/读文件/查调用关系/看结构选 explore；\n");
-        sb.append("4. 如果都不明确，选 explore。\n");
+        sb.append("4. 如果都不明确，选 ").append(defaultAgentName()).append("。\n");
         sb.append("\n必须严格输出下面格式的 JSON（不要 markdown、不要额外说明）:\n");
         sb.append("{\n");
         sb.append("  \"agent\": \"子 Agent 名字\",\n");
@@ -195,7 +237,7 @@ public class SubAgentRoutingService {
     private RouteDecision routeByKeywords(String task) {
         String lower = task.toLowerCase(Locale.ROOT);
 
-        // 1. 先扫强信号词（从子 Agent 动态收集）
+        // 1. 先扫强信号词（子 Agent 声明 + yml 补充）
         for (Map.Entry<String, String> e : strongKeywords.entrySet()) {
             if (lower.contains(e.getKey().toLowerCase(Locale.ROOT))) {
                 if (agentIndex.containsKey(e.getValue())) {
@@ -204,12 +246,13 @@ public class SubAgentRoutingService {
             }
         }
 
-        // 2. 默认兜底：explore（如果有）
-        if (agentIndex.containsKey("explore")) {
-            return new RouteDecision("explore", task, "默认路由", false);
+        // 2. 默认兜底：DomainConfig.defaultAgent
+        String defaultAgent = defaultAgentName();
+        if (agentIndex.containsKey(defaultAgent)) {
+            return new RouteDecision(defaultAgent, task, "默认路由", false);
         }
 
-        // 3. 连 explore 都没有，取第一个注册的
+        // 3. 连 defaultAgent 都没有，取第一个注册的
         if (!agentIndex.isEmpty()) {
             String first = agentIndex.keySet().iterator().next();
             return new RouteDecision(first, task, "无匹配，取第一个", false);
@@ -221,7 +264,6 @@ public class SubAgentRoutingService {
 
     /**
      * 判断任务是否"复杂"到需要先走 Plan 子 Agent。
-     * 供主循环决策使用，不是路由器本身的路由规则（路由交给 LLM）。
      */
     public boolean isComplexTask(String task) {
         if (task == null) return false;
@@ -239,6 +281,15 @@ public class SubAgentRoutingService {
     // 工具方法
     // ================================================================
 
+    /** 从 DomainConfig 读默认 Agent，兜底 "explore" */
+    private String defaultAgentName() {
+        if (domainConfig != null && domainConfig.getDefaultAgent() != null
+                && !domainConfig.getDefaultAgent().isBlank()) {
+            return domainConfig.getDefaultAgent();
+        }
+        return "explore";
+    }
+
     private static String text(JsonNode node, String field) {
         if (node == null) return null;
         JsonNode v = node.get(field);
@@ -248,9 +299,7 @@ public class SubAgentRoutingService {
     /** 从可能带 markdown/前后说明文本的内容里抠出最外层 JSON 对象 */
     private static String extractJson(String text) {
         if (text == null) return null;
-        // 先去除 ```json ... ``` 围栏
         String cleaned = text.replaceAll("(?s)```(?:json)?\\s*(.*?)\\s*```", "$1").trim();
-        // 找最外层 { ... }
         Matcher m = Pattern.compile("\\{[\\s\\S]*}").matcher(cleaned);
         return m.find() ? m.group() : null;
     }

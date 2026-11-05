@@ -30,7 +30,7 @@ public class ReadFileTool {
         this.basePath = Paths.get(projectBasePath).toAbsolutePath().normalize();
     }
 
-    @Tool("读取项目中的完整源代码文件。当需要查看某个类的完整实现时调用。")
+//    @Tool("读取项目中的完整源代码文件。当需要查看某个类的完整实现时调用。")
     public String readFile(@P("相对于项目根目录的文件路径，例如: framework/src/main/java/com/bf/novel/framework/dal/system/Sysusers.java") String relativePath) {
         if (relativePath == null || relativePath.isBlank()) {
             return "文件路径为空";

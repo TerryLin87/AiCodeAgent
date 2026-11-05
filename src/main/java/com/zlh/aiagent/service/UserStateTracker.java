@@ -27,8 +27,9 @@ public class UserStateTracker {
     private final Map<String, List<StateChange>> stateHistory = new ConcurrentHashMap<>();
 
     // 简易规则：匹配 “改成A”、“用B”、“按C来”、“就看D” 等模式
-    private static final Pattern STATE_PATTERN = Pattern.compile("(?:改成|换成|用|按|就看|选择)\\s*([a-zA-Z0-9\\u4e00-\\u9fa5]{2,10})");
-
+    private static final Pattern STATE_PATTERN = Pattern.compile(
+            "(?:改成|换成|改为|换为|切换到|调整为|变更成|变成)\\s*"
+                    + "([a-zA-Z0-9\\u4e00-\\u9fa5_\\-]{2,10})");
     /**
      * 提取并记录状态变更
      */

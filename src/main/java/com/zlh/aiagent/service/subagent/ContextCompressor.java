@@ -1,5 +1,6 @@
 package com.zlh.aiagent.service.subagent;
 
+import com.zlh.aiagent.config.DomainConfig;
 import com.zlh.aiagent.enums.CallType;
 import com.zlh.aiagent.instances.IHistoryStoreService;
 import com.zlh.aiagent.model.DeepSeekModel;
@@ -37,6 +38,9 @@ public class ContextCompressor {
 
     @Autowired
     private IHistoryStoreService historyStore;
+
+    @Autowired
+    private DomainConfig domainConfig;
 
     @Getter
     @Setter
@@ -433,23 +437,17 @@ public class ContextCompressor {
                 })
                 .collect(Collectors.joining("\n"));
 
-        String prompt = String.format("""
-                请将以下对话浓缩为一份简洁的摘要，保留关键信息：
-                - 用户的主要需求和问题
-                - 已经采取的行动和工具调用
-                - 重要发现和结论
-                - 当前状态和未完成的工作
+        String template = (domainConfig != null && domainConfig.getSummaryPromptTemplate() != null
+                && !domainConfig.getSummaryPromptTemplate().isBlank())
+                ? domainConfig.getSummaryPromptTemplate()
+                : """
+              请将以下对话浓缩为一份简洁的摘要，保留关键信息：
+              对话内容：
+              {content}
+              摘要：
+              """;
 
-                要求：
-                1. 摘要长度控制在 300 字以内
-                2. 使用中文
-                3. 只保留最关键的信息
-
-                对话内容：
-                %s
-
-                摘要：
-                """, content);
+        String prompt = template.replace("{content}", content);
 
         try {
             ChatRequest req = ChatRequest.builder().messages(List.of(UserMessage.from(prompt))).build();

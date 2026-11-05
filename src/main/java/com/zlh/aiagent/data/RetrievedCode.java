@@ -18,22 +18,28 @@ public class RetrievedCode implements RetrievalResult {
 
     @Override
     public String getTitle() {
-        return "";
+        // 优先 "类名.方法名()"，其次类名，最后空
+        if (className != null && methodName != null && !methodName.isBlank()) {
+            return className + "." + methodName + "()";
+        }
+        return className != null ? className : "";
     }
 
     @Override
     public String getSource() {
-        return "";
+        // 项目名作为 source（文档领域可换成 docSource）
+        return projectName != null ? projectName : "";
     }
 
     @Override
     public String getCategory() {
-        return "";
+        // segmentType 作为分类：class / method / interface / enum
+        return segmentType != null ? segmentType : "unknown";
     }
 
     @Override
     public double getScore() {
-        return 0;
+        return similarity;
     }
 
     @Override
@@ -42,6 +48,9 @@ public class RetrievedCode implements RetrievalResult {
             case "packageName" -> packageName;
             case "projectName" -> projectName;
             case "methodName" -> methodName;
+            case "className" -> className;
+            case "filePath" -> filePath;          // ★ 补上，Citation 要用
+            case "segmentType" -> segmentType;    // ★ 补上
             default -> null;
         };
     }
@@ -52,6 +61,9 @@ public class RetrievedCode implements RetrievalResult {
         if (packageName != null) meta.put("packageName", packageName);
         if (projectName != null) meta.put("projectName", projectName);
         if (methodName != null) meta.put("methodName", methodName);
+        if (className != null) meta.put("className", className);
+        if (filePath != null) meta.put("filePath", filePath);
+        if (segmentType != null) meta.put("segmentType", segmentType);
         return meta;
     }
 }

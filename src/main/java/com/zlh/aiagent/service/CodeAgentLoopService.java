@@ -1,15 +1,16 @@
 package com.zlh.aiagent.service;
 
 import com.zlh.aiagent.config.DomainConfig;
-import com.zlh.aiagent.data.AgentSession;
-import com.zlh.aiagent.data.EvaluationResult;
-import com.zlh.aiagent.data.MemoryDocument;
+import com.zlh.aiagent.data.*;
+import com.zlh.aiagent.data.http.AgentResponse;
 import com.zlh.aiagent.enums.AgentStatus;
 import com.zlh.aiagent.instances.IToolPlugin;
 import com.zlh.aiagent.model.DeepSeekModel;
 import com.zlh.aiagent.service.subagent.ContextCompressor;
 import com.zlh.aiagent.service.subagent.PlanSubAgent;
+import com.zlh.aiagent.tools.AgentTools;
 import com.zlh.aiagent.tools.ToolCallGuard;
+import com.zlh.aiagent.tools.ToolCallTrace;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.mcp.McpToolProvider;
@@ -20,20 +21,19 @@ import dev.langchain4j.service.UserMessage;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.aop.framework.AopProxyUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -92,6 +92,15 @@ public class CodeAgentLoopService {
 
     @Autowired
     private UserStateTracker userStateTracker;
+
+    @Autowired
+    private AgentTools agentTools;
+
+    @Autowired
+    private WorkingMemoryService workingMemoryService;
+
+    @Autowired
+    private ToolCallTrace toolCallTrace;
 
     // ================================================================
     // 配置项
@@ -199,6 +208,7 @@ public class CodeAgentLoopService {
 
         toolCallGuard.reset(sessionId);
         ToolCallGuard.setCurrentSession(sessionId);
+        toolCallTrace.clear(sessionId);
 
         try {
             AgentSession session = sessionManager.getOrCreateSession(sessionId);
@@ -234,6 +244,12 @@ public class CodeAgentLoopService {
                         pendingPlanContext.put(sessionId, planText);
                         log.info("复杂任务已生成执行计划，耗时 {}ms，计划长度 {}",
                                 System.currentTimeMillis() - planStart, planText.length());
+
+                        // 把计划步骤写入工作记忆
+                        List<WorkingMemory.StepRecord> steps = toStepRecords(plan);
+                        if (!steps.isEmpty()) {
+                            workingMemoryService.initSteps(sessionId, userMessage, steps);
+                        }
                     }
                 } catch (Exception e) {
                     log.warn("生成执行计划失败，按普通任务处理: {}", e.getMessage());
@@ -247,6 +263,9 @@ public class CodeAgentLoopService {
 
             // 5. 正式调用模型 (带工具执行)
             String response = assistant.chat(sessionId, finalUserMessage);
+
+            //工具轨迹 → 工作记忆步骤自动标记
+            syncWorkingMemoryWithTrace(sessionId);
 
             // 6. 反思与自动修正
             response = applyReflexion(sessionId, userMessage, response);
@@ -269,6 +288,143 @@ public class CodeAgentLoopService {
             pendingPlanContext.remove(sessionId);
             ToolCallGuard.clearCurrentSession();
         }
+    }
+
+    /**
+     * 把 Plan 的 ToolExecutionRequest 列表转成 WorkingMemory.StepRecord。
+     *
+     * <p>Plan 生成的每一步 action 对应一个 StepRecord，初始状态为 PENDING。
+     */
+    private List<WorkingMemory.StepRecord> toStepRecords(AiMessage plan) {
+        if (plan == null || plan.toolExecutionRequests() == null
+                || plan.toolExecutionRequests().isEmpty()) {
+            return List.of();
+        }
+        List<WorkingMemory.StepRecord> records = new ArrayList<>();
+        int order = 1;
+        for (var req : plan.toolExecutionRequests()) {
+            records.add(WorkingMemory.StepRecord.builder()
+                    .order(order++)
+                    .action(req.name())
+                    .params(req.arguments())
+                    .description(req.name() + "(" + req.arguments() + ")")
+                    .status(0)   // PENDING，按你 PlanStatus 枚举的 PENDING 值调整
+                    .timestamp(java.time.LocalDateTime.now())
+                    .build());
+        }
+        return records;
+    }
+
+    // ================================================================
+    // 带引用的执行入口（T5）
+    // ================================================================
+
+    /**
+     * 带引用的执行入口：返回 {@link AgentResponse}（正文 + citations）。
+     *
+     * <p>与 {@link #execute(String, String)} 的区别：本方法在返回前会解析工具输出里的
+     * {@code [ref:...]} 标记，转换成结构化的 Citation 列表，并从正文中移除标记。
+     *
+     * @param sessionId   会话 ID
+     * @param userMessage 用户消息
+     * @return 含 citations 的响应
+     */
+    public AgentResponse executeWithCitations(String sessionId, String userMessage)
+            throws InterruptedException {
+        long start = System.currentTimeMillis();
+
+        if (!globalSemaphore.tryAcquire(5, TimeUnit.SECONDS)) {
+            return AgentResponse.builder()
+                    .sessionId(sessionId)
+                    .content("系统繁忙，请稍后重试")
+                    .citations(List.of())
+                    .executionTimeMs(System.currentTimeMillis() - start)
+                    .build();
+        }
+        try {
+            Semaphore sessionSem = sessionSemaphores.computeIfAbsent(sessionId, k -> new Semaphore(1));
+            if (!sessionSem.tryAcquire(3, TimeUnit.SECONDS)) {
+                return AgentResponse.builder()
+                        .sessionId(sessionId)
+                        .content("当前会话有请求正在处理，请稍后")
+                        .citations(List.of())
+                        .executionTimeMs(System.currentTimeMillis() - start)
+                        .build();
+            }
+            try {
+                // 每轮开始前清空引用缓存，避免上一轮结果混入
+                agentTools.clearCitationCache();
+
+                String rawContent = doExecute(sessionId, userMessage);
+
+                // 解析 [ref:...] 并移除标记
+                List<Citation> citations = extractCitations(rawContent);
+                String cleanContent = rawContent == null ? ""
+                        : rawContent.replaceAll("\\n?\\[ref:[^\\]]+\\]", "").trim();
+
+                //填充工具轨迹 + 元数据
+                List<String> toolCalls = toolCallTrace.getToolNames(sessionId);
+                Map<String, Object> metadata = new HashMap<>();
+                WorkingMemory wm = workingMemoryService.get(sessionId);
+                if (wm != null) {
+                    metadata.put("goal", wm.getGoal());
+                    metadata.put("completedSteps", wm.getCompletedSteps());
+                    metadata.put("totalSteps", wm.getTotalSteps());
+                    metadata.put("currentPhase", wm.getCurrentPhase());
+                }
+
+                return AgentResponse.builder()
+                        .sessionId(sessionId)
+                        .content(cleanContent)
+                        .citations(citations)
+                        .toolCalls(toolCalls)
+                        .metadata(metadata)
+                        .executionTimeMs(System.currentTimeMillis() - start)
+                        .build();
+            } finally {
+                sessionSem.release();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return AgentResponse.builder()
+                    .sessionId(sessionId)
+                    .content("请求被中断")
+                    .citations(List.of())
+                    .executionTimeMs(System.currentTimeMillis() - start)
+                    .build();
+        } finally {
+            globalSemaphore.release();
+        }
+    }
+
+    /**
+     * 从响应正文里提取 {@code [ref:id1,id2]} 标记，转成 Citation 列表。
+     *
+     * @param content Agent 原始响应（含标记）
+     * @return 去重后的 Citation 列表，无标记时返回空列表
+     */
+    private List<Citation> extractCitations(String content) {
+        if (content == null || content.isBlank()) return List.of();
+
+        Set<String> ids = new LinkedHashSet<>();
+        Matcher m = Pattern.compile("\\[ref:([^\\]]+)\\]").matcher(content);
+        while (m.find()) {
+            for (String id : m.group(1).split(",")) {
+                String trimmed = id.trim();
+                if (!trimmed.isEmpty()) ids.add(trimmed);
+            }
+        }
+
+        Map<String, RetrievalResult> cache = agentTools.getCitationCache();
+        List<Citation> citations = new ArrayList<>();
+        for (String id : ids) {
+            RetrievalResult r = cache.get(id);
+            if (r != null) {
+                Citation c = Citation.from(r);
+                if (c != null) citations.add(c);
+            }
+        }
+        return citations;
     }
 
     // ================================================================
@@ -382,6 +538,12 @@ public class CodeAgentLoopService {
                     .append(memoryContext);
         }
 
+        //注入工作记忆（让模型知道做到哪了）
+        String workingMemoryPrompt = workingMemoryService.renderForPrompt(sessionId);
+        if (!workingMemoryPrompt.isEmpty()) {
+            sb.append(workingMemoryPrompt);
+        }
+
         return sb.toString();
     }
 
@@ -396,8 +558,13 @@ public class CodeAgentLoopService {
         Set<String> alive = new HashSet<>(sessionManager.getAllSessionIds());
         pendingMemoryContext.keySet().removeIf(id -> !alive.contains(id));
         pendingPlanContext.keySet().removeIf(id -> !alive.contains(id));
+        //清理死会话的工作记忆
+        workingMemoryService.getAllSessionIds().stream()
+                .filter(id -> !alive.contains(id))
+                .forEach(workingMemoryService::clear);
 
         toolCallGuard.evict(alive);
+        toolCallTrace.evict(alive);
 
         sessionSemaphores.entrySet().removeIf(entry -> {
             if (alive.contains(entry.getKey())) {
@@ -466,10 +633,30 @@ public class CodeAgentLoopService {
         pendingPlanContext.clear();
         sessionSemaphores.clear();
         toolCallGuard.clearAll();
+        toolCallTrace.clearAll();
+        //清空所有工作记忆
+        workingMemoryService.getAllSessionIds()
+                .forEach(workingMemoryService::clear);
         log.info("Agent 已重置");
     }
 
     public int getActiveSessionCount() {
         return sessionManager.getActiveSessionCount();
+    }
+
+    /**
+     * 把本轮工具调用轨迹同步到工作记忆：每个成功的工具调用尝试标记对应步骤完成。
+     */
+    private void syncWorkingMemoryWithTrace(String sessionId) {
+        List<ToolCallTrace.Record> records = toolCallTrace.get(sessionId);
+        if (records.isEmpty()) {
+            return;
+        }
+        for (ToolCallTrace.Record r : records) {
+            if (r.isSuccess()) {
+                workingMemoryService.markStepCompletedByAction(
+                        sessionId, r.getToolName(), r.getResultSummary());
+            }
+        }
     }
 }

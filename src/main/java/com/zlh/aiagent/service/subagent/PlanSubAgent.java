@@ -1,9 +1,12 @@
 package com.zlh.aiagent.service.subagent;
 
+import com.zlh.aiagent.config.DomainConfig;
 import com.zlh.aiagent.data.subagent.SubAgentResult;
+import com.zlh.aiagent.instances.IToolPlugin;
 import com.zlh.aiagent.instances.subagent.ISubAgent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -16,49 +19,94 @@ import dev.langchain4j.model.chat.request.json.JsonArraySchema;
 import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import dev.langchain4j.model.chat.request.json.JsonSchema;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.lang.reflect.Method;
+import java.util.*;
 import java.util.stream.Collectors;
 
 /**
  * 计划子 Agent —— Plan & Execute 里的 "Plan" 环节。
+ * <p>新增工具时无需改本类——只要工具方法带 {@code @Tool} 注解，就能被自动收集。
  */
 @Component
-//只有当配置文件里面配置的环境是code时才会加载该子agent
 @ConditionalOnProperty(name = "agent.domain.name", havingValue = "code", matchIfMissing = true)
 public class PlanSubAgent implements ISubAgent {
 
     private static final Logger log = LoggerFactory.getLogger(PlanSubAgent.class);
 
-    /** 与 SubAgentRoutingService 约定的 agent 名，路由时用 */
     public static final String AGENT_NAME = "plan";
 
     private static final int MIN_STEPS = 2;
     private static final int MAX_STEPS = 6;
 
-    /** 规划器可用的动作/工具清单（接入 MCP 后可以从 tools/list 动态拉取，不必硬编码） */
-    private static final Set<String> DEFAULT_ACTIONS = Set.of(
-            "hybrid_search", "semantic_search", "keyword_search",
-            "list_projects", "read_file", "get_class_info",
-            "find_callers", "find_callees", "impact_analysis");
-
     private final ChatModel chatModel;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private volatile Set<String> availableActions = DEFAULT_ACTIONS;
+    @Autowired
+    private List<IToolPlugin> toolPlugins;
+
+    @Autowired
+    private DomainConfig domainConfig;
+
+    /** 可用动作清单，启动时自动收集 */
+    private volatile Set<String> availableActions = Set.of();
 
     public PlanSubAgent(@Qualifier("DeepSeekModel") ChatModel chatModel) {
         this.chatModel = chatModel;
+    }
+
+    // ================================================================
+    // 启动时自动收集可用动作
+    // ================================================================
+
+    @PostConstruct
+    public void collectAvailableActions() {
+        Set<String> actions = new LinkedHashSet<>();
+
+        // 1. 从所有 IToolPlugin 的 @Tool 方法收集
+        if (toolPlugins != null) {
+            for (IToolPlugin plugin : toolPlugins) {
+                if (plugin.getToolBeans() == null) continue;
+                for (Object bean : plugin.getToolBeans()) {
+                    collectFromBean(bean, actions);
+                }
+            }
+        }
+
+        // 2. 黑名单排除（DomainConfig.excludedActions）
+        Set<String> excluded = domainConfig == null || domainConfig.getExcludedActions() == null
+                ? Set.of()
+                : new HashSet<>(domainConfig.getExcludedActions());
+        if (!excluded.isEmpty()) {
+            int before = actions.size();
+            actions.removeAll(excluded);
+            log.info("PlanSubAgent 排除黑名单动作: {}（{} → {}）", excluded, before, actions.size());
+        }
+
+        this.availableActions = Set.copyOf(actions);
+        log.info("PlanSubAgent 自动收集 {} 个可用动作: {}", actions.size(), actions);
+    }
+
+    /**
+     * 从单个 Bean 的方法里收集 {@code @Tool} 注解的工具名。
+     * 处理 Spring CGLIB 代理：注解在父类/接口方法上，需向上遍历。
+     */
+    private void collectFromBean(Object bean, Set<String> out) {
+        if (bean == null) return;
+        // 剥掉 CGLIB 代理拿原始类
+        Class<?> targetClass = org.springframework.aop.support.AopUtils.getTargetClass(bean);
+        for (Method m : targetClass.getMethods()) {
+            if (m.isAnnotationPresent(Tool.class)) {
+                out.add(m.getName());
+            }
+        }
     }
 
     // ================================================================
@@ -93,9 +141,7 @@ public class PlanSubAgent implements ISubAgent {
 
     @Override
     public boolean canHandle(String task) {
-        if (task == null || task.isBlank()) {
-            return false;
-        }
+        if (task == null || task.isBlank()) return false;
         String lower = task.toLowerCase();
         return lower.contains("规划") || lower.contains("方案")
                 || lower.contains("拆解") || lower.contains("分步")
@@ -103,16 +149,6 @@ public class PlanSubAgent implements ISubAgent {
                 || lower.contains("重构") || lower.contains("步骤");
     }
 
-    /**
-     * ISubAgent 入口：把任务交给 {@link #plan(String)}，把结果包装成 SubAgentResult。
-     *
-     * <p>返回内容的组织形式：
-     * <ul>
-     *   <li>人类可读的编号步骤文本（来自 plan.text()）</li>
-     *   <li>机器可执行的步骤清单（来自 plan.toolExecutionRequests()）</li>
-     * </ul>
-     * 这里把两者拼在一起输出，主 Agent 可以据此继续执行。
-     */
     @Override
     public SubAgentResult execute(String task, Map<String, Object> context) {
         log.info("PlanSubAgent 执行任务: {}", task);
@@ -124,14 +160,10 @@ public class PlanSubAgent implements ISubAgent {
             if (text == null || text.isBlank()) {
                 return SubAgentResult.failure("规划结果为空", System.currentTimeMillis() - startTime);
             }
-
-            // 额外把机器可执行步骤附在后面，方便主 Agent 决策
             String stepsBlock = formatSteps(plan.toolExecutionRequests());
             String fullContent = stepsBlock.isEmpty() ? text : text + "\n\n" + stepsBlock;
-
             log.info("PlanSubAgent 规划完成，耗时 {}ms", System.currentTimeMillis() - startTime);
             return SubAgentResult.success(fullContent, System.currentTimeMillis() - startTime);
-
         } catch (Exception e) {
             log.error("PlanSubAgent 执行失败", e);
             return SubAgentResult.failure("规划失败: " + e.getMessage(),
@@ -140,15 +172,17 @@ public class PlanSubAgent implements ISubAgent {
     }
 
     // ================================================================
-    // 原有核心方法（保留，供内部或旧调用方使用）
+    // 核心规划方法
     // ================================================================
 
-    /**
-     * 把用户任务拆解成有序步骤。
-     */
     public AiMessage plan(String task) {
         if (task == null || task.isBlank()) {
             return AiMessage.from("任务为空，未生成计划。", List.of());
+        }
+
+        // 如果动作清单为空（比如工具没注册），先尝试重收集一次
+        if (availableActions.isEmpty()) {
+            collectAvailableActions();
         }
 
         try {
@@ -178,43 +212,23 @@ public class PlanSubAgent implements ISubAgent {
         }
     }
 
-    /** 取出可读计划文本（注入上下文用） */
     public String describe(AiMessage plan) {
-        if (plan == null) {
-            return "";
-        }
+        if (plan == null) return "";
         String text = plan.text();
         return text == null ? "" : text;
     }
 
-    /** 取出可执行步骤（原生 ToolExecutionRequest 列表，只读） */
     public List<ToolExecutionRequest> stepsOf(AiMessage plan) {
-        if (plan == null) {
-            return List.of();
-        }
+        if (plan == null) return List.of();
         return Collections.unmodifiableList(plan.toolExecutionRequests());
     }
 
-    /**
-     * 可选：接入 MCP 后，把 tools/list 拉到的工具名灌进来，规划器就能自动认识新工具。
-     */
-    public void setAvailableActions(Collection<String> actions) {
-        if (actions == null || actions.isEmpty()) {
-            return;
-        }
-        this.availableActions = Set.copyOf(actions);
-        log.info("【PlanSubAgent】可用动作清单已更新，共 {} 项：{}", actions.size(), this.availableActions);
-    }
-
     // ================================================================
-    // 格式化与提示词
+    // 提示词
     // ================================================================
 
-    /** 把可执行步骤格式化成人类可读的块，附在 plan 文本后 */
     private String formatSteps(List<ToolExecutionRequest> steps) {
-        if (steps == null || steps.isEmpty()) {
-            return "";
-        }
+        if (steps == null || steps.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
         sb.append("【可执行步骤清单】\n");
         int i = 1;
@@ -241,7 +255,6 @@ public class PlanSubAgent implements ISubAgent {
                 """.formatted(MIN_STEPS, MAX_STEPS, String.join(", ", availableActions));
     }
 
-    /** 用 LangChain4j 原生 JSON Schema 描述"计划"的结构，不需要任何自定义 POJO */
     private ResponseFormat planResponseFormat() {
         return ResponseFormat.builder()
                 .type(ResponseFormatType.JSON)
@@ -286,9 +299,14 @@ public class PlanSubAgent implements ISubAgent {
         if (stepsNode.isArray()) {
             for (JsonNode stepNode : stepsNode) {
                 String action = stepNode.path("action").asText("").trim();
-                if (action.isEmpty()) {
+                if (action.isEmpty()) continue;
+
+                // 校验 action 是否在可用清单里
+                if (!availableActions.isEmpty() && !availableActions.contains(action)) {
+                    log.warn("【PlanSubAgent】模型给出的 action '{}' 不在可用清单中，已跳过", action);
                     continue;
                 }
+
                 String description = stepNode.path("description").asText("").trim();
                 String arguments = normalizeArguments(stepNode.path("arguments"));
 
@@ -320,9 +338,6 @@ public class PlanSubAgent implements ISubAgent {
         return plan;
     }
 
-    /**
-     * 抠出最外层的 JSON 对象：LLM 常见的 ```json 围栏、前后寒暄都在这里兜掉。
-     */
     private String extractJsonObject(String raw) {
         if (raw == null || raw.isBlank()) {
             throw new IllegalArgumentException("模型输出为空");
@@ -330,12 +345,8 @@ public class PlanSubAgent implements ISubAgent {
         String text = raw.trim();
         if (text.startsWith("```")) {
             int firstLineBreak = text.indexOf('\n');
-            if (firstLineBreak > 0) {
-                text = text.substring(firstLineBreak + 1);
-            }
-            if (text.endsWith("```")) {
-                text = text.substring(0, text.length() - 3);
-            }
+            if (firstLineBreak > 0) text = text.substring(firstLineBreak + 1);
+            if (text.endsWith("```")) text = text.substring(0, text.length() - 3);
             text = text.trim();
         }
         int start = text.indexOf('{');
@@ -346,20 +357,11 @@ public class PlanSubAgent implements ISubAgent {
         return text.substring(start, end + 1);
     }
 
-    /**
-     * 归一化 arguments：必须是合法 JSON 字符串。
-     */
     private String normalizeArguments(JsonNode node) {
-        if (node == null || node.isMissingNode() || node.isNull()) {
-            return "{}";
-        }
-        if (node.isObject() || node.isArray()) {
-            return node.toString();
-        }
+        if (node == null || node.isMissingNode() || node.isNull()) return "{}";
+        if (node.isObject() || node.isArray()) return node.toString();
         String candidate = node.asText("").trim();
-        if (candidate.isEmpty()) {
-            return "{}";
-        }
+        if (candidate.isEmpty()) return "{}";
         try {
             objectMapper.readTree(candidate);
             return candidate;
@@ -376,25 +378,26 @@ public class PlanSubAgent implements ISubAgent {
         }
     }
 
-    /** 兜底：连 LLM 都调不通时，给一个"先检索定位"的最小计划 */
     private AiMessage fallbackPlan(String task) {
+        // 兜底计划优先用 hybridSearch；若不在可用清单，用第一个可用动作
+        String fallbackAction = availableActions.contains("hybridSearch")
+                ? "hybridSearch"
+                : (availableActions.isEmpty() ? "hybridSearch" : availableActions.iterator().next());
         String arguments = wrapAsRaw(task);
         ToolExecutionRequest step = ToolExecutionRequest.builder()
                 .id("step-1")
-                .name("hybrid_search")
+                .name(fallbackAction)
                 .arguments(arguments)
                 .build();
         String text = "任务概述：" + task
                 + "\n执行步骤：\n"
-                + "1. [hybrid_search] 降级方案：未能生成结构化计划，先做一次混合检索定位相关代码\n"
+                + "1. [" + fallbackAction + "] 降级方案：未能生成结构化计划，先做一次检索定位相关代码\n"
                 + "   参数：" + arguments + "\n";
         return AiMessage.from(text, List.of(step));
     }
 
     private void logUsage(String mode, ChatResponse response) {
-        if (response == null || response.tokenUsage() == null) {
-            return;
-        }
+        if (response == null || response.tokenUsage() == null) return;
         log.info("【PlanSubAgent】模式={}，输入token={}，输出token={}", mode,
                 response.tokenUsage().inputTokenCount(),
                 response.tokenUsage().outputTokenCount());

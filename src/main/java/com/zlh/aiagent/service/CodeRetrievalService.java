@@ -1,5 +1,6 @@
 package com.zlh.aiagent.service;
 
+import com.zlh.aiagent.config.DomainConfig;
 import com.zlh.aiagent.data.RetrievalResult;
 import com.zlh.aiagent.data.RetrievedCode;
 import com.zlh.aiagent.utils.DegradationLogger;
@@ -67,11 +68,14 @@ public class CodeRetrievalService {
     @Autowired
     private DegradationLogger degradationLogger;
 
+    @Autowired
+    private DomainConfig domainConfig;
+
     /**
      * 根据需求检索相似代码。
      */
     public List<RetrievedCode> search(String query, int maxResults) {
-        return search(query, maxResults, null, null);
+        return search(query, maxResults, null, defaultMinScore());
     }
 
     /**
@@ -153,7 +157,7 @@ public class CodeRetrievalService {
      * 混合搜索入口。
      */
     public List<RetrievedCode> hybridSearch(String query, int maxResults) {
-        return hybridSearch(query, maxResults, null, 0.3);
+        return hybridSearch(query, maxResults, null, defaultMinScore());
     }
 
     public List<RetrievedCode> hybridSearch(String query, int maxResults, String projectName, Double minScore) {
@@ -432,5 +436,15 @@ public class CodeRetrievalService {
             log.error("精确查找类定义失败", e);
             return List.of();
         }
+    }
+
+    /**
+     * 从 DomainConfig 读默认 minScore，兜底 0.3。
+     */
+    private double defaultMinScore() {
+        if (domainConfig != null && domainConfig.getRetrievalMinScore() > 0) {
+            return domainConfig.getRetrievalMinScore();
+        }
+        return 0.3;
     }
 }

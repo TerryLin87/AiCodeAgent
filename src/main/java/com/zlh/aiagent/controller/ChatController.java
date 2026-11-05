@@ -1,6 +1,7 @@
 package com.zlh.aiagent.controller;
 
 import com.zlh.aiagent.data.AgentSession;
+import com.zlh.aiagent.data.http.AgentResponse;
 import com.zlh.aiagent.data.http.ChatMessageRequest;
 import com.zlh.aiagent.service.CodeAgentLoopService;
 import com.zlh.aiagent.service.SessionManager;
@@ -86,5 +87,17 @@ public class ChatController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("success", false, "error", e.getMessage()));
         }
+    }
+
+    /**
+     * 带引用的对话接口。
+     */
+    @PostMapping("/chat/citations")
+    public AgentResponse chatWithCitations(@Valid @RequestBody ChatMessageRequest req)
+            throws InterruptedException {
+        String sessionId = req.getSessionId() != null && !req.getSessionId().isBlank()
+                ? req.getSessionId()
+                : UUID.randomUUID().toString();
+        return agentLoopService.executeWithCitations(sessionId, req.getMessage());
     }
 }

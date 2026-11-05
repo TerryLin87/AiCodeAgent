@@ -103,13 +103,15 @@ public class AutoFixerService {
 
         sb.append("【评估结果】\n");
         sb.append("总分: ").append(evaluation.getOverallScore()).append("/10\n");
-        sb.append("正确性: ").append(evaluation.getCorrectness()).append("/10\n");
-        sb.append("完整性: ").append(evaluation.getCompleteness()).append("/10\n");
-        sb.append("清晰度: ").append(evaluation.getClarity()).append("/10\n");
-        sb.append("规范性: ").append(evaluation.getNormativity()).append("/10\n");
-        sb.append("可用性: ").append(evaluation.getUsability()).append("/10\n\n");
 
-        if (!evaluation.getWeaknesses().isEmpty()) {
+        // 动态维度
+        if (evaluation.getDimensionScores() != null) {
+            evaluation.getDimensionScores().forEach((name, score) ->
+                    sb.append(name).append(": ").append(score).append("/10\n"));
+        }
+        sb.append("\n");
+
+        if (evaluation.getWeaknesses() != null && !evaluation.getWeaknesses().isEmpty()) {
             sb.append("【需要改进的问题】\n");
             for (String w : evaluation.getWeaknesses()) {
                 sb.append("- ").append(w).append("\n");
@@ -117,7 +119,7 @@ public class AutoFixerService {
             sb.append("\n");
         }
 
-        if (!evaluation.getSuggestions().isEmpty()) {
+        if (evaluation.getSuggestions() != null && !evaluation.getSuggestions().isEmpty()) {
             sb.append("【改进建议】\n");
             for (String s : evaluation.getSuggestions()) {
                 sb.append("- ").append(s).append("\n");
@@ -126,7 +128,6 @@ public class AutoFixerService {
         }
 
         sb.append("请输出修正后的完整内容，确保所有问题都已解决。");
-
         return sb.toString();
     }
 }

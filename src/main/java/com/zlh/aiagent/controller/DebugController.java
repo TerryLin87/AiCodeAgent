@@ -355,11 +355,10 @@ public class DebugController {
         resultMap.put("success", true);
         resultMap.put("overallScore", result.getOverallScore());
         resultMap.put("passed", result.isPassed());
-        resultMap.put("correctness", result.getCorrectness());
-        resultMap.put("completeness", result.getCompleteness());
-        resultMap.put("clarity", result.getClarity());
-        resultMap.put("normativity", result.getNormativity());
-        resultMap.put("usability", result.getUsability());
+
+        // ★ 动态维度：直接返回 Map，不依赖具体维度名
+        resultMap.put("dimensionScores", result.getDimensionScores());
+
         resultMap.put("strengths", result.getStrengths());
         resultMap.put("weaknesses", result.getWeaknesses());
         resultMap.put("suggestions", result.getSuggestions());
