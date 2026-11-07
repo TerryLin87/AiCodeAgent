@@ -1,7 +1,7 @@
 package com.zlh.aiagent.instances;
 
-import com.zlh.aiagent.data.http.AgentRequest;
-import com.zlh.aiagent.data.http.AgentResponse;
+import com.zlh.aiagent.data.common.http.AgentRequest;
+import com.zlh.aiagent.data.common.http.AgentResponse;
 import com.zlh.aiagent.enums.AgentStatus;
 
 //agent抽象接口

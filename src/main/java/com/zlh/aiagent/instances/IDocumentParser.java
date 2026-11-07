@@ -1,6 +1,6 @@
 package com.zlh.aiagent.instances;
 
-import com.zlh.aiagent.data.FilePath;
+import com.zlh.aiagent.data.code.FilePath;
 import com.zlh.aiagent.data.ParseResult;
 
 import java.util.List;

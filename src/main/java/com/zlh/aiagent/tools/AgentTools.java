@@ -1,11 +1,11 @@
 package com.zlh.aiagent.tools;
 
-import com.zlh.aiagent.data.RetrievalResult;
-import com.zlh.aiagent.data.subagent.SubAgentResult;
+import com.zlh.aiagent.data.common.RetrievalResult;
+import com.zlh.aiagent.data.common.subagent.SubAgentResult;
 import com.zlh.aiagent.instances.IKnowledgeGraphService;
-import com.zlh.aiagent.service.CallRelationService;
-import com.zlh.aiagent.service.CodeRetrievalService;
-import com.zlh.aiagent.service.subagent.SubAgentScheduler;
+import com.zlh.aiagent.service.code.CallRelationService;
+import com.zlh.aiagent.service.code.CodeRetrievalService;
+import com.zlh.aiagent.service.common.SubAgentScheduler;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import lombok.Getter;
@@ -48,7 +48,7 @@ public class AgentTools {
      * 获取引用缓存（供 CodeAgentLoopService 读取）
      */
     @Getter
-    private final java.util.Map<String, com.zlh.aiagent.data.RetrievalResult> citationCache
+    private final java.util.Map<String, RetrievalResult> citationCache
             = new ConcurrentHashMap<>();
 
     /** 工具调用上限的统一提示语 */
@@ -338,10 +338,10 @@ public class AgentTools {
      * @param results 检索结果列表，可为空
      * @return 形如 "\n[ref:abc,def]" 的标记；无结果时返回空串
      */
-    private String buildRefTag(java.util.List<? extends com.zlh.aiagent.data.RetrievalResult> results) {
+    private String buildRefTag(java.util.List<? extends RetrievalResult> results) {
         if (results == null || results.isEmpty()) return "";
         Set<String> ids = new LinkedHashSet<>();
-        for (com.zlh.aiagent.data.RetrievalResult r : results) {
+        for (RetrievalResult r : results) {
             String id = r.getSourceId();
             if (id != null && !id.isBlank()) {
                 citationCache.putIfAbsent(id, r);

@@ -1,6 +1,6 @@
 package com.zlh.aiagent.utils.health;
 
-import com.zlh.aiagent.service.CodeRetrievalService;
+import com.zlh.aiagent.service.code.CodeRetrievalService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.health.contributor.Health;
 import org.springframework.boot.health.contributor.HealthIndicator;

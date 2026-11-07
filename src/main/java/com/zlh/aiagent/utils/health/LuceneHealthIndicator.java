@@ -1,6 +1,6 @@
 package com.zlh.aiagent.utils.health;
 
-import com.zlh.aiagent.service.KeywordSearchService;
+import com.zlh.aiagent.service.code.KeywordSearchService;
 import org.springframework.boot.health.contributor.Health;
 import org.springframework.boot.health.contributor.HealthIndicator;
 

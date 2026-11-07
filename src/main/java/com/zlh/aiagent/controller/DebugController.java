@@ -1,12 +1,19 @@
 package com.zlh.aiagent.controller;
 
-import com.zlh.aiagent.data.AgentSession;
-import com.zlh.aiagent.data.CallRelation;
-import com.zlh.aiagent.data.EvaluationResult;
-import com.zlh.aiagent.data.RetrievedCode;
-import com.zlh.aiagent.service.*;
-import com.zlh.aiagent.service.graph.ClassIndexService;
-import com.zlh.aiagent.service.subagent.SubAgentScheduler;
+import com.zlh.aiagent.data.common.AgentSession;
+import com.zlh.aiagent.data.code.CallRelation;
+import com.zlh.aiagent.data.common.EvaluationResult;
+import com.zlh.aiagent.data.code.RetrievedCode;
+import com.zlh.aiagent.service.code.CallRelationService;
+import com.zlh.aiagent.service.code.CodeRetrievalService;
+import com.zlh.aiagent.service.code.HybridSearchService;
+import com.zlh.aiagent.service.code.SelfEvaluationService;
+import com.zlh.aiagent.service.common.AutoFixerService;
+import com.zlh.aiagent.service.common.LongTermMemoryService;
+import com.zlh.aiagent.service.common.SessionManager;
+import com.zlh.aiagent.service.common.WorkingMemoryService;
+import com.zlh.aiagent.service.code.graph.ClassIndexService;
+import com.zlh.aiagent.service.common.SubAgentScheduler;
 import com.zlh.aiagent.tools.ProjectStructureTool;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;

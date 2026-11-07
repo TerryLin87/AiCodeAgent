@@ -1,8 +1,8 @@
 package com.zlh.aiagent.newservice;
 
-import com.zlh.aiagent.data.tools.ToolDefinition;
-import com.zlh.aiagent.data.tools.ToolExecutionResult;
-import com.zlh.aiagent.data.tools.ToolParameter;
+import com.zlh.aiagent.data.common.tools.ToolDefinition;
+import com.zlh.aiagent.data.common.tools.ToolExecutionResult;
+import com.zlh.aiagent.data.common.tools.ToolParameter;
 import com.zlh.aiagent.instances.AgentTool;
 import com.zlh.aiagent.instances.ToolParam;
 import lombok.Setter;

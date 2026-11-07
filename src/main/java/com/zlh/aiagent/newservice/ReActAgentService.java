@@ -1,7 +1,7 @@
 package com.zlh.aiagent.newservice;
 
-import com.zlh.aiagent.data.http.AgentRequest;
-import com.zlh.aiagent.data.http.AgentResponse;
+import com.zlh.aiagent.data.common.http.AgentRequest;
+import com.zlh.aiagent.data.common.http.AgentResponse;
 import com.zlh.aiagent.enums.AgentStatus;
 import com.zlh.aiagent.instances.IAgent;
 import com.zlh.aiagent.model.DeepSeekModel;

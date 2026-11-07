@@ -1,8 +1,8 @@
 package com.zlh.aiagent.instances;
 
-import com.zlh.aiagent.data.graph.GraphNode;
-import com.zlh.aiagent.data.graph.GraphPath;
-import com.zlh.aiagent.data.graph.GraphEdge;
+import com.zlh.aiagent.data.common.graph.GraphNode;
+import com.zlh.aiagent.data.common.graph.GraphPath;
+import com.zlh.aiagent.data.common.graph.GraphEdge;
 
 import java.util.List;
 

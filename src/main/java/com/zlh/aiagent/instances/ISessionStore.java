@@ -1,6 +1,6 @@
 package com.zlh.aiagent.instances;
 
-import com.zlh.aiagent.data.AgentSession;
+import com.zlh.aiagent.data.common.AgentSession;
 
 import java.util.Set;
 

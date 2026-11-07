@@ -1,7 +1,7 @@
 package com.zlh.aiagent.utils.health;
 
-import com.zlh.aiagent.service.SessionManager;
-import com.zlh.aiagent.service.WorkingMemoryService;
+import com.zlh.aiagent.service.common.SessionManager;
+import com.zlh.aiagent.service.common.WorkingMemoryService;
 import org.springframework.boot.health.contributor.Health;
 import org.springframework.boot.health.contributor.HealthIndicator;
 

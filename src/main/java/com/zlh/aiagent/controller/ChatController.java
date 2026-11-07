@@ -1,10 +1,10 @@
 package com.zlh.aiagent.controller;
 
-import com.zlh.aiagent.data.AgentSession;
-import com.zlh.aiagent.data.http.AgentResponse;
-import com.zlh.aiagent.data.http.ChatMessageRequest;
-import com.zlh.aiagent.service.CodeAgentLoopService;
-import com.zlh.aiagent.service.SessionManager;
+import com.zlh.aiagent.data.common.AgentSession;
+import com.zlh.aiagent.data.common.http.AgentResponse;
+import com.zlh.aiagent.data.common.http.ChatMessageRequest;
+import com.zlh.aiagent.service.common.CodeAgentLoopService;
+import com.zlh.aiagent.service.common.SessionManager;
 import io.github.resilience4j.ratelimiter.RateLimiter;
 import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
 import io.github.resilience4j.ratelimiter.RequestNotPermitted;

@@ -1,0 +1,169 @@
+package com.zlh.aiagent.service.code;
+
+import com.zlh.aiagent.config.DomainConfig;
+import com.zlh.aiagent.data.code.RetrievedCode;
+import com.zlh.aiagent.utils.DegradationLogger;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.stereotype.Service;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
+
+/**
+ * 混合检索服务：语义检索（Milvus 向量）+ 关键词检索（Lucene BM25），
+ * 两路结果按 RRF 融合后返回，兼顾语义相关性与关键词精确命中。
+ *
+ * <p>功能分区：
+ * <ul>
+ *   <li>【A】依赖注入与权重配置</li>
+ *   <li>【B】混合检索入口</li>
+ *   <li>【C】RRF 融合与结果合并</li>
+ *   <li>【D】索引构建与默认阈值</li>
+ * </ul>
+ */
+@Slf4j
+@Service
+public class HybridSearchService {
+
+    //region 【A】依赖注入与权重配置
+
+    @Autowired
+    private DegradationLogger degradationLogger;
+
+    @Autowired
+    @Lazy
+    private CodeRetrievalService semanticSearchService;
+
+    @Autowired
+    private KeywordSearchService keywordSearchService;
+
+    @Autowired
+    private DomainConfig domainConfig;
+
+    @Value("${search.hybrid.semantic-weight:0.6}")
+    private double semanticWeight;
+
+    @Value("${search.hybrid.keyword-weight:0.4}")
+    private double keywordWeight;
+
+    //endregion
+
+    //region 【B】混合检索入口
+
+    /**
+     * 混合检索（语义 + 关键词），使用默认最小分值与不限项目。
+     */
+    public List<RetrievedCode> hybridSearch(String query, int topK) {
+        return hybridSearch(query, topK, null, defaultMinScore());
+    }
+
+    /**
+     * 混合检索（带过滤）
+     */
+    public List<RetrievedCode> hybridSearch(String query, int topK, String projectName, Double minScore) {
+        double effectiveMinScore = minScore != null ? minScore : defaultMinScore();
+        log.info("混合检索: query={}, project={}, topK={}", query, projectName, topK);
+
+        int recallSize = topK * 3;  // 召回更多候选
+
+        // 1. 语义检索
+        List<RetrievedCode> semanticResults = semanticSearchService.search(query, recallSize, projectName, effectiveMinScore);
+
+        // 2. 关键词检索
+        List<RetrievedCode> keywordResults = keywordSearchService.search(query, recallSize);
+
+        if (keywordResults.isEmpty()) {
+            degradationLogger.log("HybridSearch", "keyword results empty, fallback to pure semantic");
+        }
+
+        // 3. 按项目过滤（如果指定）
+        if (projectName != null && !projectName.isEmpty()) {
+            keywordResults = keywordResults.stream()
+                    .filter(c -> projectName.equals(c.getProjectName()))
+                    .collect(Collectors.toList());
+        }
+
+        // 4. RRF 融合
+        List<RetrievedCode> merged = rrfMerge(semanticResults, keywordResults, topK);
+
+        log.info("混合检索完成: 结果数={}", merged.size());
+        return merged;
+    }
+
+    //endregion
+
+    //region 【C】RRF 融合与结果合并
+
+    /**
+     * RRF (Reciprocal Rank Fusion) 融合（以后还需要加上Cross-Encoder模型）。
+     * 按 k=60 的倒数排名分别给两路结果打分并累加，最后按总分排序截断。
+     */
+    private List<RetrievedCode> rrfMerge(List<RetrievedCode> results1,
+                                         List<RetrievedCode> results2,
+                                         int topK) {
+        Map<String, Double> scores = new HashMap<>();
+        Map<String, RetrievedCode> codeMap = new HashMap<>();
+        double k = 60.0;
+
+        // 语义检索结果打分
+        for (int i = 0; i < results1.size(); i++) {
+            RetrievedCode code = results1.get(i);
+            String key = buildKey(code);
+            double score = semanticWeight / (k + i + 1);
+            scores.merge(key, score, Double::sum);
+            codeMap.putIfAbsent(key, code);
+        }
+
+        // 关键词检索结果打分
+        for (int i = 0; i < results2.size(); i++) {
+            RetrievedCode code = results2.get(i);
+            String key = buildKey(code);
+            double score = keywordWeight / (k + i + 1);
+            scores.merge(key, score, Double::sum);
+            codeMap.putIfAbsent(key, code);
+        }
+
+        // 排序并截断
+        return scores.entrySet().stream()
+                .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
+                .limit(topK)
+                .map(e -> codeMap.get(e.getKey()))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+
+    private String buildKey(RetrievedCode code) {
+        return code.getProjectName() + ":" + code.getPackageName() + ":" + code.getClassName();
+    }
+
+    //endregion
+
+    //region 【D】索引构建与默认阈值
+
+    /**
+     * 在项目启动时构建关键词索引：从 Milvus 全量拉取代码片段喂给关键词检索服务。
+     */
+    public void buildKeywordIndex() {
+        // 从 Milvus 加载所有代码
+        List<RetrievedCode> allCode = semanticSearchService.getAllSegments(null, 10000);
+        if (!allCode.isEmpty()) {
+            keywordSearchService.buildIndex(allCode);
+            log.info("关键词索引构建完成，共 {} 条记录", allCode.size());
+        }
+    }
+
+    private double defaultMinScore() {
+        if (domainConfig != null && domainConfig.getRetrievalMinScore() > 0) {
+            return domainConfig.getRetrievalMinScore();
+        }
+        return 0.3;
+    }
+
+    //endregion
+}

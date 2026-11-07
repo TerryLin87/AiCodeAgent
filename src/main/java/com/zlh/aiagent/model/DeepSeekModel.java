@@ -2,8 +2,8 @@ package com.zlh.aiagent.model;
 
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
-import com.zlh.aiagent.data.execeptions.ModelCircuitOpenException;
-import com.zlh.aiagent.data.execeptions.ModelUnavailableException;
+import com.zlh.aiagent.data.common.execeptions.ModelCircuitOpenException;
+import com.zlh.aiagent.data.common.execeptions.ModelUnavailableException;
 import com.zlh.aiagent.enums.CallType;
 import com.zlh.aiagent.recorder.TokenUsageRecorder;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;

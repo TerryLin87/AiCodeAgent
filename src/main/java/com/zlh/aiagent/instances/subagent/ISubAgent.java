@@ -1,6 +1,6 @@
 package com.zlh.aiagent.instances.subagent;
 
-import com.zlh.aiagent.data.subagent.SubAgentResult;
+import com.zlh.aiagent.data.common.subagent.SubAgentResult;
 
 import java.util.List;
 import java.util.Map;

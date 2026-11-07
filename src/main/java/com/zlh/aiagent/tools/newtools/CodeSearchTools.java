@@ -1,9 +1,9 @@
 package com.zlh.aiagent.tools.newtools;
 
-import com.zlh.aiagent.data.RetrievedCode;
+import com.zlh.aiagent.data.code.RetrievedCode;
 import com.zlh.aiagent.instances.AgentTool;
 import com.zlh.aiagent.instances.ToolParam;
-import com.zlh.aiagent.service.CodeRetrievalService;
+import com.zlh.aiagent.service.code.CodeRetrievalService;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import lombok.extern.slf4j.Slf4j;
