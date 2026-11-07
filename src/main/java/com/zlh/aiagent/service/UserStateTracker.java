@@ -12,9 +12,27 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * 用户状态追踪器。
+ *
+ * <p>职责：从用户消息里识别"改成 X / 换成 X / 按 X 来"这类状态变更并记录成历史，
+ * 并在用户使用"第二个""原来的"等指代时，回溯出对应的目标状态，用于消解多轮对话中的指代。
+ *
+ * <p>功能分区：
+ * <ul>
+ *   <li>【A】内部数据结构与存储</li>
+ *   <li>【B】状态变更识别规则</li>
+ *   <li>【C】状态变更记录</li>
+ *   <li>【D】指代解析</li>
+ *   <li>【E】工具方法</li>
+ * </ul>
+ */
 @Slf4j
 @Component
 public class UserStateTracker {
+
+    //region 【A】内部数据结构与存储
+    /** 一次状态变更记录。 */
     @Data
     public static class StateChange {
         private int sequence;
@@ -26,10 +44,18 @@ public class UserStateTracker {
     // sessionId -> 状态变更历史
     private final Map<String, List<StateChange>> stateHistory = new ConcurrentHashMap<>();
 
+    //endregion
+
+    //region 【B】状态变更识别规则
+
     // 简易规则：匹配 “改成A”、“用B”、“按C来”、“就看D” 等模式
     private static final Pattern STATE_PATTERN = Pattern.compile(
             "(?:改成|换成|改为|换为|切换到|调整为|变更成|变成)\\s*"
                     + "([a-zA-Z0-9\\u4e00-\\u9fa5_\\-]{2,10})");
+    //endregion
+
+    //region 【C】状态变更记录
+
     /**
      * 提取并记录状态变更
      */
@@ -49,6 +75,10 @@ public class UserStateTracker {
             log.info("记录状态变更: session={}, 序号={}, 目标={}", sessionId, change.getSequence(), target);
         }
     }
+
+    //endregion
+
+    //region 【D】指代解析
 
     /**
      * 解析指代（如“第二个”、“之前的”）
@@ -78,6 +108,11 @@ public class UserStateTracker {
         return null;
     }
 
+    //endregion
+
+    //region 【E】工具方法
+
+    /** 中文数字（一~五）转 int，无法识别返回 -1。 */
     private int parseChineseNumber(String s) {
         return switch (s) {
             case "一", "1" -> 1;
@@ -88,4 +123,6 @@ public class UserStateTracker {
             default -> -1;
         };
     }
+
+    //endregion
 }

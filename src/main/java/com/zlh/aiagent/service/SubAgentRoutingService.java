@@ -29,11 +29,27 @@ import java.util.stream.Collectors;
  *
  * <p>路由策略：LLM 优先，关键词兜底。
  *
+ * <p>关键词表来源：子 Agent 自己声明为主（{@link ISubAgent#getRoutingKeywords()}），
+ * DomainConfig 的 routing-keywords 仅作补充、不覆盖。
+ *
  * <p>默认 Agent 从 {@link DomainConfig#getDefaultAgent()} 读取，不再硬编码 "explore"。
+ *
+ * <p>功能分区：
+ * <ul>
+ *   <li>【A】依赖注入与核心字段</li>
+ *   <li>【B】初始化（Agent 索引与关键词表）</li>
+ *   <li>【C】路由主入口与执行</li>
+ *   <li>【D】LLM 路由</li>
+ *   <li>【E】关键词兜底路由</li>
+ *   <li>【F】任务复杂度判断</li>
+ *   <li>【G】工具方法</li>
+ * </ul>
  */
 @Slf4j
 @Service
 public class SubAgentRoutingService {
+
+    //region 【A】依赖注入与核心字段
 
     @Autowired
     @Qualifier("DeepSeekModel")
@@ -58,6 +74,11 @@ public class SubAgentRoutingService {
 
     private Map<String, ISubAgent> agentIndex;
 
+    //endregion
+
+    //region 【B】初始化（Agent 索引与关键词表）
+
+    /** 应用启动时构建 Agent 索引与关键词表，并缓存路由 Prompt。 */
     @PostConstruct
     public void init() {
         agentIndex = allAgents.stream()
@@ -101,9 +122,9 @@ public class SubAgentRoutingService {
                 agentIndex.keySet(), strongKeywords.size(), fromAgents, fromYml, defaultAgentName());
     }
 
-    // ================================================================
-    // 主入口
-    // ================================================================
+    //endregion
+
+    //region 【C】路由主入口与执行
 
     /**
      * 主入口：给定任务，返回路由决策。
@@ -167,10 +188,11 @@ public class SubAgentRoutingService {
         }
     }
 
-    // ================================================================
-    // LLM 路由
-    // ================================================================
+    //endregion
 
+    //region 【D】LLM 路由
+
+    /** 调 LLM 做路由决策；返回 null 表示未拿到合法结果（交由关键词兜底）。 */
     private RouteDecision routeByLlm(String task) throws JsonProcessingException {
         String prompt = routingPrompt + "\n\n【用户任务】\n" + task +
                 "\n\n请严格按上述 JSON 格式输出，不要输出其他内容，不要加 markdown 围栏。";
@@ -206,6 +228,7 @@ public class SubAgentRoutingService {
                 true);
     }
 
+    /** 构建路由 Prompt：列出所有子 Agent 的能力与选择规则，要求输出固定 JSON。 */
     private String buildRoutingPrompt() {
         StringBuilder sb = new StringBuilder();
         sb.append("你是一个子 Agent 路由器。根据用户任务，从下列子 Agent 中选择最合适的一个来处理，");
@@ -230,10 +253,11 @@ public class SubAgentRoutingService {
         return sb.toString();
     }
 
-    // ================================================================
-    // 关键词兜底路由
-    // ================================================================
+    //endregion
 
+    //region 【E】关键词兜底路由
+
+    /** 关键词兜底：命中强信号词 -> domainConfig 默认 Agent -> 第一个注册的 Agent。 */
     private RouteDecision routeByKeywords(String task) {
         String lower = task.toLowerCase(Locale.ROOT);
 
@@ -262,6 +286,10 @@ public class SubAgentRoutingService {
         return new RouteDecision("", task, "无可用子 Agent", false);
     }
 
+    //endregion
+
+    //region 【F】任务复杂度判断
+
     /**
      * 判断任务是否"复杂"到需要先走 Plan 子 Agent。
      */
@@ -277,9 +305,9 @@ public class SubAgentRoutingService {
         return hit >= 2;
     }
 
-    // ================================================================
-    // 工具方法
-    // ================================================================
+    //endregion
+
+    //region 【G】工具方法
 
     /** 从 DomainConfig 读默认 Agent，兜底 "explore" */
     private String defaultAgentName() {
@@ -290,6 +318,7 @@ public class SubAgentRoutingService {
         return "explore";
     }
 
+    /** 安全取 JSON 字符串字段，空 / 缺失返回 null。 */
     private static String text(JsonNode node, String field) {
         if (node == null) return null;
         JsonNode v = node.get(field);
@@ -304,8 +333,11 @@ public class SubAgentRoutingService {
         return m.find() ? m.group() : null;
     }
 
+    /** 超长字符串截断并加省略号，用于日志。 */
     private static String truncate(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max) + "...";
     }
+
+    //endregion
 }

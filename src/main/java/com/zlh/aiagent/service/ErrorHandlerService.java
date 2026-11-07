@@ -10,14 +10,34 @@ import java.net.SocketTimeoutException;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
+/**
+ * 异常处理服务：统一做异常分类、带重试执行与降级兜底。
+ *
+ * <p>功能分区：
+ * <ul>
+ *   <li>【A】常量与配置</li>
+ *   <li>【B】异常分析与分类</li>
+ *   <li>【C】带重试的执行</li>
+ *   <li>【D】降级结果</li>
+ *   <li>【E】异常类型判断</li>
+ * </ul>
+ */
 @Slf4j
 @Service
 public class ErrorHandlerService {
+
+    //region 【A】常量与配置
+
     private static final int MAX_RETRIES = 3;
     private static final long RETRY_DELAY_MS = 1000;
 
+    //endregion
+
+    //region 【B】异常分析与分类
+
     /**
-     * 分析和分类异常
+     * 分析和分类异常：按类型归入网络/超时/空结果/解析/权限/未知六类，
+     * 并给出对应的可恢复性、恢复动作与用户提示文案。
      */
     public ErrorResult analyzeException(Exception e) {
         log.error("异常分析: {}", e.getClass().getName());
@@ -93,8 +113,12 @@ public class ErrorHandlerService {
                 .build();
     }
 
+    //endregion
+
+    //region 【C】带重试的执行
+
     /**
-     * 执行带重试的操作
+     * 执行带重试的操作：失败后按"递增延迟"策略重试，遇到不可恢复错误立即抛出。
      */
     public <T> T executeWithRetry(Supplier<T> action, String actionName) throws Exception {
         ErrorResult lastError = null;
@@ -135,8 +159,12 @@ public class ErrorHandlerService {
                 (lastError != null ? lastError.getUserMessage() : "未知错误"));
     }
 
+    //endregion
+
+    //region 【D】降级结果
+
     /**
-     * 获取降级结果
+     * 获取降级结果：按错误类型返回面向用户的兜底提示文案。
      */
     public String getFallbackResult(String actionName, ErrorResult error) {
         log.info("返回降级结果: action={}, error={}", actionName, error.getErrorType());
@@ -157,7 +185,9 @@ public class ErrorHandlerService {
         };
     }
 
-    // ==================== 异常类型判断 ====================
+    //endregion
+
+    //region 【E】异常类型判断
 
     private boolean isNetworkException(Exception e) {
         return e instanceof ConnectException ||
@@ -189,4 +219,6 @@ public class ErrorHandlerService {
                 (e.getMessage() != null && (e.getMessage().contains("permission") ||
                         e.getMessage().contains("access denied")));
     }
+
+    //endregion
 }

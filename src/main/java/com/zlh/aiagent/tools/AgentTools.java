@@ -2,6 +2,7 @@ package com.zlh.aiagent.tools;
 
 import com.zlh.aiagent.data.RetrievalResult;
 import com.zlh.aiagent.data.subagent.SubAgentResult;
+import com.zlh.aiagent.instances.IKnowledgeGraphService;
 import com.zlh.aiagent.service.CallRelationService;
 import com.zlh.aiagent.service.CodeRetrievalService;
 import com.zlh.aiagent.service.subagent.SubAgentScheduler;
@@ -38,6 +39,9 @@ public class AgentTools {
 
     @Autowired
     private ToolCallTrace toolCallTrace;
+
+    @Autowired
+    private IKnowledgeGraphService knowledgeGraphService;
 
     /** 本会话检索结果缓存：sourceId -> RetrievalResult，供 CodeAgentLoopService 提取 Citation
      * -- GETTER --
@@ -199,6 +203,127 @@ public class AgentTools {
             Map<String, Object> context = new HashMap<>();
             SubAgentResult result = subAgentScheduler.delegate(agentName, task, context);
             return result.isSuccess() ? result.getContent() : "执行失败: " + result.getErrorMessage();
+        });
+    }
+
+    @Tool("查询两个方法之间的调用路径。当需要了解'A 是否间接调用 B'时使用。")
+    public String findPaths(
+            @P("起点，格式 project:Class.method，如 framework:UserService.login") String from,
+            @P("终点，格式 project:Class.method") String to,
+            @P("最大跳数，默认 3") int maxDepth) {
+        String limit = checkToolCall("findPaths");
+        if (limit != null) return limit;
+
+        int depth = maxDepth <= 0 ? 3 : Math.min(maxDepth, 5);
+        return traced("findPaths", "{\"from\":\"" + from + "\",\"to\":\"" + to + "\"}", () -> {
+            var paths = knowledgeGraphService.findPaths(from, to, depth);
+            if (paths.isEmpty()) {
+                return "未找到从 " + from + " 到 " + to + " 的路径（最多 " + depth + " 跳）";
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("找到 ").append(paths.size()).append(" 条路径:\n\n");
+            for (int i = 0; i < paths.size(); i++) {
+                sb.append(i + 1).append(". ").append(paths.get(i).getSummary()).append("\n");
+            }
+            return sb.toString();
+        });
+    }
+
+    @Tool("查询修改某个项目会影响哪些项目（项目级影响分析）。")
+    public String analyzeProjectImpact(
+            @P("项目名，如 framework") String projectName) {
+        String limit = checkToolCall("analyzeProjectImpact");
+        if (limit != null) return limit;
+
+        return traced("analyzeProjectImpact", "{\"project\":\"" + projectName + "\"}", () -> {
+            List<String> directDeps = knowledgeGraphService.getProjectDependents(projectName);
+            if (directDeps.isEmpty()) {
+                return "没有项目直接依赖 " + projectName + "，修改安全。";
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("修改 ").append(projectName).append(" 会影响以下 ").append(directDeps.size()).append(" 个项目:\n\n");
+            for (String dep : directDeps) {
+                sb.append("  - ").append(dep).append("\n");
+            }
+            // 加传递依赖（BFS 2 层）
+            Set<String> transitive = new LinkedHashSet<>();
+            for (String d : directDeps) {
+                transitive.addAll(knowledgeGraphService.getProjectDependents(d));
+            }
+            transitive.removeAll(directDeps);
+            transitive.remove(projectName);
+            if (!transitive.isEmpty()) {
+                sb.append("\n传递影响（间接依赖）:\n");
+                transitive.forEach(d -> sb.append("  - ").append(d).append("\n"));
+            }
+            return sb.toString();
+        });
+    }
+
+    @Tool("查询接口的所有实现类。当用户问'XX接口有哪些实现类'时使用。")
+    public String getImplementations(
+            @P("接口名，如 IUserService 或 com.bf.framework.IUserService") String interfaceName) {
+        String limit = checkToolCall("getImplementations");
+        if (limit != null) return limit;
+
+        return traced("getImplementations", "{\"interface\":\"" + interfaceName + "\"}", () -> {
+            var impls = knowledgeGraphService.getImplementations(interfaceName);
+            if (impls.isEmpty()) {
+                return "未找到接口 " + interfaceName + " 的实现类。可能原因："
+                        + "1) 接口名拼写错误；2) 实现类未被索引；3) 该接口尚未被实现。";
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("接口 ").append(interfaceName).append(" 共有 ")
+                    .append(impls.size()).append(" 个实现类:\n\n");
+            for (var node : impls) {
+                sb.append("  - ").append(node.getLabel())
+                        .append(" @ ").append(node.getProject()).append("\n");
+            }
+            return sb.toString();
+        });
+    }
+
+    @Tool("查询类直接依赖的类（@Autowired / 字段类型）。当需要了解'XX类依赖谁'时使用。")
+    public String getClassDependencies(
+            @P("类名，如 UserController") String className) {
+        String limit = checkToolCall("getClassDependencies");
+        if (limit != null) return limit;
+
+        return traced("getClassDependencies", "{\"className\":\"" + className + "\"}", () -> {
+            var deps = knowledgeGraphService.getClassDependencies(className);
+            if (deps.isEmpty()) {
+                return "未找到类 " + className + " 的字段依赖信息（可能该类没有字段，或未被索引）。";
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("类 ").append(className).append(" 直接依赖 ")
+                    .append(deps.size()).append(" 个类:\n\n");
+            for (var node : deps) {
+                sb.append("  - ").append(node.getLabel())
+                        .append(" @ ").append(node.getProject()).append("\n");
+            }
+            return sb.toString();
+        });
+    }
+
+    @Tool("查询类的所有子类（继承链）。当需要了解'XX类有哪些子类'时使用。")
+    public String getSubclasses(
+            @P("父类名，如 BaseService") String className) {
+        String limit = checkToolCall("getSubclasses");
+        if (limit != null) return limit;
+
+        return traced("getSubclasses", "{\"className\":\"" + className + "\"}", () -> {
+            var subs = knowledgeGraphService.getSubclasses(className);
+            if (subs.isEmpty()) {
+                return "未找到类 " + className + " 的子类。";
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("类 ").append(className).append(" 共有 ")
+                    .append(subs.size()).append(" 个子类:\n\n");
+            for (var node : subs) {
+                sb.append("  - ").append(node.getLabel())
+                        .append(" @ ").append(node.getProject()).append("\n");
+            }
+            return sb.toString();
         });
     }
 

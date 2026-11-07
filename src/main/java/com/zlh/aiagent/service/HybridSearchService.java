@@ -15,10 +15,24 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
-//混合检索服务
+/**
+ * 混合检索服务：语义检索（Milvus 向量）+ 关键词检索（Lucene BM25），
+ * 两路结果按 RRF 融合后返回，兼顾语义相关性与关键词精确命中。
+ *
+ * <p>功能分区：
+ * <ul>
+ *   <li>【A】依赖注入与权重配置</li>
+ *   <li>【B】混合检索入口</li>
+ *   <li>【C】RRF 融合与结果合并</li>
+ *   <li>【D】索引构建与默认阈值</li>
+ * </ul>
+ */
 @Slf4j
 @Service
 public class HybridSearchService {
+
+    //region 【A】依赖注入与权重配置
+
     @Autowired
     private DegradationLogger degradationLogger;
 
@@ -38,8 +52,12 @@ public class HybridSearchService {
     @Value("${search.hybrid.keyword-weight:0.4}")
     private double keywordWeight;
 
+    //endregion
+
+    //region 【B】混合检索入口
+
     /**
-     * 混合检索（语义 + 关键词）
+     * 混合检索（语义 + 关键词），使用默认最小分值与不限项目。
      */
     public List<RetrievedCode> hybridSearch(String query, int topK) {
         return hybridSearch(query, topK, null, defaultMinScore());
@@ -78,8 +96,13 @@ public class HybridSearchService {
         return merged;
     }
 
+    //endregion
+
+    //region 【C】RRF 融合与结果合并
+
     /**
-     * RRF (Reciprocal Rank Fusion) 融合（以后还需要加上Cross-Encoder模型）
+     * RRF (Reciprocal Rank Fusion) 融合（以后还需要加上Cross-Encoder模型）。
+     * 按 k=60 的倒数排名分别给两路结果打分并累加，最后按总分排序截断。
      */
     private List<RetrievedCode> rrfMerge(List<RetrievedCode> results1,
                                          List<RetrievedCode> results2,
@@ -119,8 +142,12 @@ public class HybridSearchService {
         return code.getProjectName() + ":" + code.getPackageName() + ":" + code.getClassName();
     }
 
+    //endregion
+
+    //region 【D】索引构建与默认阈值
+
     /**
-     * 在项目启动时构建关键词索引
+     * 在项目启动时构建关键词索引：从 Milvus 全量拉取代码片段喂给关键词检索服务。
      */
     public void buildKeywordIndex() {
         // 从 Milvus 加载所有代码
@@ -137,4 +164,6 @@ public class HybridSearchService {
         }
         return 0.3;
     }
+
+    //endregion
 }

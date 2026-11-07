@@ -21,6 +21,9 @@ import java.util.*;
 /**
  * 自我评估服务。
  *
+ * <p>职责：按当前领域定义的多维度给代码/回答打分，加权计算总分并按阈值判定是否通过，
+ * 是"反思闭环"中的评判者；模型熔断、不可用或响应不可解析时返回保守降级结果，不抛异常。
+ *
  * <p>T3 改造：评估维度、权重、通过阈值从 {@link DomainConfig} 读取，不再硬编码。
  *
  * <p>维度定义来自 {@code agent.domain.evaluation-dimensions}：
@@ -32,10 +35,23 @@ import java.util.*;
  * </ul>
  *
  * <p>通过阈值来自 {@code agent.domain.pass-threshold}（默认 7.0）。
+ *
+ * <p>功能分区：
+ * <ul>
+ *   <li>【A】依赖注入与常量</li>
+ *   <li>【B】自我评估主流程</li>
+ *   <li>【C】评估 Prompt 构建</li>
+ *   <li>【D】响应解析与总分计算</li>
+ *   <li>【E】维度配置与兜底</li>
+ *   <li>【F】JSON 安全解析工具方法</li>
+ *   <li>【G】降级结果与报告输出</li>
+ * </ul>
  */
 @Slf4j
 @Service
 public class SelfEvaluationService {
+
+    //region 【A】依赖注入与常量
 
     @Autowired
     @Qualifier("DeepSeekModel")
@@ -49,8 +65,18 @@ public class SelfEvaluationService {
     /** 降级时的保守分值 */
     private static final double FALLBACK_SCORE = 5.0;
 
+    //endregion
+
+    //region 【B】自我评估主流程
+
     /**
      * 自我评估：按当前领域的维度定义评估内容质量。
+     *
+     * <p>任何异常（熔断、模型不可用、解析失败）一律转为保守降级结果返回，不向上抛出。
+     *
+     * @param content 待评估内容
+     * @param context 任务上下文 / 需求
+     * @return 含各维度得分、加权总分与是否通过的评估结果
      */
     public EvaluationResult evaluate(String content, String context) {
         List<DomainConfig.EvaluationDimension> dimensions = dimensions();
@@ -79,10 +105,11 @@ public class SelfEvaluationService {
         }
     }
 
-    // ================================================================
-    // Prompt 构建（动态维度）
-    // ================================================================
+    //endregion
 
+    //region 【C】评估 Prompt 构建
+
+    /** 构建评估 Prompt：动态拼接维度说明、评分要求与 JSON 输出示例。 */
     private String buildEvaluationPrompt(String content, String context,
                                          List<DomainConfig.EvaluationDimension> dimensions) {
         StringBuilder dimsPrompt = new StringBuilder();
@@ -128,10 +155,11 @@ public class SelfEvaluationService {
             """, context, content, dimsPrompt, jsonExample);
     }
 
-    // ================================================================
-    // 解析
-    // ================================================================
+    //endregion
 
+    //region 【D】响应解析与总分计算
+
+    /** 解析模型返回的 JSON：逐维度取分（缺失或非法一律回退到保守分值）。 */
     private EvaluationResult parseEvaluation(String raw,
                                              List<DomainConfig.EvaluationDimension> dimensions) throws Exception {
         String json = extractJsonObject(raw);
@@ -182,9 +210,9 @@ public class SelfEvaluationService {
         result.setPassed(overall >= passThreshold);
     }
 
-    // ================================================================
-    // 工具方法
-    // ================================================================
+    //endregion
+
+    //region 【E】维度配置与兜底
 
     /** 从 DomainConfig 读维度列表，兜底为默认 5 维度（防止配置缺失） */
     private List<DomainConfig.EvaluationDimension> dimensions() {
@@ -202,6 +230,7 @@ public class SelfEvaluationService {
         );
     }
 
+    /** 构造一个评估维度（用于配置缺失时的兜底默认维度）。 */
     private DomainConfig.EvaluationDimension dim(String name, String label, String desc, Double weight) {
         DomainConfig.EvaluationDimension d = new DomainConfig.EvaluationDimension();
         d.setName(name);
@@ -211,6 +240,11 @@ public class SelfEvaluationService {
         return d;
     }
 
+    //endregion
+
+    //region 【F】JSON 安全解析工具方法
+
+    /** 从可能带 Markdown 围栏或前后说明的文本里抠出最外层 JSON 对象。 */
     private String extractJsonObject(String raw) {
         if (raw == null) return null;
         String text = raw.trim();
@@ -223,6 +257,7 @@ public class SelfEvaluationService {
         return text.substring(start, end + 1);
     }
 
+    /** 取一个维度分数：兼容数字与字符串，非法值 / NaN 回退默认值，最后裁剪到 [0,10]。 */
     private double safeScore(JsonNode node, String field, double defaultValue) {
         if (node == null) return defaultValue;
         JsonNode valueNode = node.get(field);
@@ -244,6 +279,7 @@ public class SelfEvaluationService {
         return Math.max(0.0, Math.min(10.0, value));
     }
 
+    /** 取字符串列表字段：兼容数组与单字符串，过滤空白项。 */
     private List<String> safeList(JsonNode node, String field) {
         List<String> results = new ArrayList<>();
         if (node == null) return results;
@@ -261,6 +297,11 @@ public class SelfEvaluationService {
         return results;
     }
 
+    //endregion
+
+    //region 【G】降级结果与报告输出
+
+    /** 构造降级评估结果：所有维度给保守分值、判定为未通过，并把原因写入缺点列表。 */
     private EvaluationResult fallbackResult(String reason,
                                             List<DomainConfig.EvaluationDimension> dimensions) {
         Map<String, Double> scores = new LinkedHashMap<>();
@@ -278,6 +319,7 @@ public class SelfEvaluationService {
         return result;
     }
 
+    /** 便捷方法：判断评估结果是否通过。 */
     public boolean isPassed(EvaluationResult result) {
         return result.isPassed();
     }
@@ -318,4 +360,6 @@ public class SelfEvaluationService {
         }
         return sb.toString();
     }
+
+    //endregion
 }

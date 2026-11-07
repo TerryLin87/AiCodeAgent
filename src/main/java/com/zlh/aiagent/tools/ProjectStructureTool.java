@@ -59,9 +59,7 @@ public class ProjectStructureTool {
             sb.append("   📂 路径: ").append(p.getPath()).append("\n");
 
             // 从 Milvus 查询该项目有哪些包
-            List<RetrievedCode> classes = retrievalService.search(
-                    "project:" + p.getName(), 20
-            );
+            List<RetrievedCode> classes = retrievalService.getByProject(p.getName(), 20);
             Set<String> packages = classes.stream()
                     .map(RetrievedCode::getPackageName)
                     .filter(pkg -> pkg != null && !pkg.isEmpty())
@@ -91,9 +89,7 @@ public class ProjectStructureTool {
         sb.append("=".repeat(60)).append("\n\n");
 
         // 1. 从 Milvus 检索该项目所有类级别记录
-        List<RetrievedCode> classes = retrievalService.search(
-                "project:" + projectName, 500
-        );
+        List<RetrievedCode> classes = retrievalService.getByProject(projectName, 500);
 
         if (classes.isEmpty()) {
             return "⚠️ 未找到项目: " + projectName + "\n\n" +

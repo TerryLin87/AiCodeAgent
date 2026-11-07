@@ -16,9 +16,24 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 
+/**
+ * 自动修正服务。
+ *
+ * <p>职责：当自评环节（SelfEvaluationService）判定内容质量不达标时，驱动大模型做多轮定向修正，
+ * 直到质量达标或触达最大尝试次数，是"反思闭环"中的执行器。
+ *
+ * <p>功能分区：
+ * <ul>
+ *   <li>【A】依赖注入与常量</li>
+ *   <li>【B】自动修正主流程</li>
+ *   <li>【C】修正 Prompt 构建</li>
+ * </ul>
+ */
 @Slf4j
 @Service
 public class AutoFixerService {
+
+    //region 【A】依赖注入与常量
 
     @Autowired
     @Qualifier("DeepSeekModel")
@@ -27,10 +42,23 @@ public class AutoFixerService {
     @Autowired
     private SelfEvaluationService evaluationService;
 
+    /** 最大修正轮次，达到上限仍不达标则保留当前内容并提示人工审核 */
     private static final int MAX_FIX_ATTEMPTS = 3;
 
+    //endregion
+
+    //region 【B】自动修正主流程
+
     /**
-     * 自动修正：根据评估结果修正代码/回答
+     * 自动修正：根据评估结果修正代码/回答。
+     *
+     * <p>循环逻辑：构建修正 Prompt → 调模型 → 重新评估 → 达标或达上限退出；
+     * 熔断、模型不可用、返回空内容等异常一律安全退出，保留当前最佳内容。
+     *
+     * @param content    待修正的原始内容
+     * @param context    任务上下文（用户原始诉求）
+     * @param evaluation 首轮评估结果
+     * @return 含最终内容、最终评估、尝试次数与结论说明的修正报告
      */
     public AutoFixResult fix(String content, String context, EvaluationResult evaluation) {
         log.info("开始自动修正");
@@ -90,8 +118,12 @@ public class AutoFixerService {
                 .build();
     }
 
+    //endregion
+
+    //region 【C】修正 Prompt 构建
+
     /**
-     * 构建修正 Prompt
+     * 构建修正 Prompt：把原始内容、评分明细、待改进问题与改进建议拼成一段指令。
      */
     private String buildFixPrompt(String content, String context, EvaluationResult evaluation) {
         StringBuilder sb = new StringBuilder();
@@ -130,4 +162,6 @@ public class AutoFixerService {
         sb.append("请输出修正后的完整内容，确保所有问题都已解决。");
         return sb.toString();
     }
+
+    //endregion
 }

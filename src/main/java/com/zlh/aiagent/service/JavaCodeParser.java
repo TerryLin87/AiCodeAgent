@@ -31,10 +31,30 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
+/**
+ * Java 源码解析器：基于 JavaParser 把 .java 文件解析成代码片段（类/方法）并抽取调用关系
+ * （方法调用、构造调用、继承、字段类型等），供向量化入库与影响分析使用。
+ *
+ * <p>功能分区：
+ * <ul>
+ *   <li>【A】解析器与依赖配置</li>
+ *   <li>【B】项目名推断初始化</li>
+ *   <li>【C】解析入口</li>
+ *   <li>【D】代码片段构建（类片段 / 方法片段）</li>
+ *   <li>【E】原有辅助方法（保留）</li>
+ *   <li>【F】import 上下文与类型推断</li>
+ *   <li>【G】调用关系提取</li>
+ *   <li>【H】继承关系提取</li>
+ *   <li>【I】字段类型关系提取</li>
+ * </ul>
+ */
 @Slf4j
 @Component
 @ConditionalOnProperty(name = "agent.domain.name", havingValue = "code", matchIfMissing = true)
 public class JavaCodeParser implements IDocumentParser {
+
+    //region 【A】解析器与依赖配置
+
     private JavaParser javaParser;
 
     @Autowired
@@ -65,9 +85,9 @@ public class JavaCodeParser implements IDocumentParser {
         buildPackageProjectMapping();
     }
 
-    // ================================================================
-    // 项目名推断初始化
-    // ================================================================
+    //endregion
+
+    //region 【B】项目名推断初始化
 
     private void buildPackageProjectMapping() {
         String subProjectsPath = indexConfig.getSubProjectsPath();
@@ -110,9 +130,9 @@ public class JavaCodeParser implements IDocumentParser {
         }
     }
 
-    // ================================================================
-    // 解析入口
-    // ================================================================
+    //endregion
+
+    //region 【C】解析入口
 
     @Override
     public String getDomain() {
@@ -227,9 +247,11 @@ public class JavaCodeParser implements IDocumentParser {
         return result;
     }
 
-    // ================================================================
-    // ★ 你原来的实现：buildClassSegment
-    // ================================================================
+    //endregion
+
+    //region 【D】代码片段构建（类片段 / 方法片段）
+
+    // ---- 类级片段构建 ----
 
     private CodeSegment buildClassSegment(FilePath filePath, String packageName,
                                           List<String> imports, TypeDeclaration<?> type) {
@@ -277,9 +299,7 @@ public class JavaCodeParser implements IDocumentParser {
                 .build();
     }
 
-    // ================================================================
-    // ★ 你原来的实现：buildMethodSegment
-    // ================================================================
+    // ---- 方法级片段构建 ----
 
     private CodeSegment buildMethodSegment(FilePath filePath, String packageName,
                                            ClassOrInterfaceDeclaration classDecl,
@@ -346,9 +366,9 @@ public class JavaCodeParser implements IDocumentParser {
                 .build();
     }
 
-    // ================================================================
-    // 原有的辅助方法（保留）
-    // ================================================================
+    //endregion
+
+    //region 【E】原有辅助方法（保留）
 
     private boolean isSimpleGetterSetter(MethodDeclaration method) {
         String name = method.getNameAsString();
@@ -445,9 +465,9 @@ public class JavaCodeParser implements IDocumentParser {
         return sb.toString();
     }
 
-    // ================================================================
-    // import 上下文 + 推断逻辑（新加）
-    // ================================================================
+    //endregion
+
+    //region 【F】import 上下文与类型推断
 
     private static class ImportContext {
         Map<String, String> simpleToFqn = new HashMap<>();
@@ -565,9 +585,9 @@ public class JavaCodeParser implements IDocumentParser {
         return packageName;
     }
 
-    // ================================================================
-    // 调用关系提取（重写）
-    // ================================================================
+    //endregion
+
+    //region 【G】调用关系提取
 
     private List<CallRelation> extractCallRelations(
             FilePath filePath,
@@ -680,9 +700,9 @@ public class JavaCodeParser implements IDocumentParser {
         return relations;
     }
 
-    // ================================================================
-    // 继承关系
-    // ================================================================
+    //endregion
+
+    //region 【H】继承关系提取
 
     private List<CallRelation> extractInheritanceRelations(
             FilePath filePath, String packageName,
@@ -731,9 +751,9 @@ public class JavaCodeParser implements IDocumentParser {
         return relations;
     }
 
-    // ================================================================
-    // 字段类型关系
-    // ================================================================
+    //endregion
+
+    //region 【I】字段类型关系提取
 
     private List<CallRelation> extractFieldRelations(
             FilePath filePath, String packageName,
@@ -788,4 +808,6 @@ public class JavaCodeParser implements IDocumentParser {
         }
         return null;
     }
+
+    //endregion
 }

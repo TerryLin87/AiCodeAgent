@@ -36,9 +36,30 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+/**
+ * Agent 主循环服务：串起"限流 → 上下文压缩 → 指代消解 → 任务规划 → 长期记忆检索 →
+ * 调用模型 → 工具轨迹同步 → 反思修正 → 记忆持久化"的完整闭环。
+ *
+ * <p>功能分区：
+ * <ul>
+ *   <li>【A】并发控制与上下文缓存</li>
+ *   <li>【B】依赖注入</li>
+ *   <li>【C】配置项</li>
+ *   <li>【D】Assistant 定义与初始化</li>
+ *   <li>【E】主执行入口（全局/会话双层限流）</li>
+ *   <li>【F】复杂任务计划 → 工作记忆步骤</li>
+ *   <li>【G】带引用的执行入口（返回正文 + citations）</li>
+ *   <li>【H】反思闭环</li>
+ *   <li>【I】记忆与系统提示词构建</li>
+ *   <li>【J】生命周期与资源回收</li>
+ *   <li>【K】辅助与状态管理</li>
+ * </ul>
+ */
 @Slf4j
 @Service
 public class CodeAgentLoopService {
+
+    //region 【A】并发控制与上下文缓存
 
     private final Semaphore globalSemaphore = new Semaphore(10);
     private final Map<String, Semaphore> sessionSemaphores = new ConcurrentHashMap<>();
@@ -48,9 +69,9 @@ public class CodeAgentLoopService {
     private static final int MEMORY_WINDOW = 50;
     private static final int MAX_CACHED_MEMORIES = 1000;
 
-    // ================================================================
-    // 依赖注入
-    // ================================================================
+    //endregion
+
+    //region 【B】依赖注入
 
     @Autowired
     @Qualifier("DeepSeekModel")
@@ -102,9 +123,9 @@ public class CodeAgentLoopService {
     @Autowired
     private ToolCallTrace toolCallTrace;
 
-    // ================================================================
-    // 配置项
-    // ================================================================
+    //endregion
+
+    //region 【C】配置项
 
     @Value("${agent.reflexion.enabled:true}")
     private boolean reflexionEnabled;
@@ -117,9 +138,9 @@ public class CodeAgentLoopService {
 
     private volatile boolean shuttingDown = false;
 
-    // ================================================================
-    // Assistant
-    // ================================================================
+    //endregion
+
+    //region 【D】Assistant 定义与初始化
 
     public interface CodingAssistant {
         String chat(@MemoryId String sessionId, @UserMessage String message);
@@ -170,9 +191,9 @@ public class CodeAgentLoopService {
                         .collect(Collectors.joining(", ")));
     }
 
-    // ================================================================
-    // 主入口
-    // ================================================================
+    //endregion
+
+    //region 【E】主执行入口（全局/会话双层限流）
 
     public String execute(String userMessage) throws InterruptedException {
         return execute(UUID.randomUUID().toString(), userMessage);
@@ -290,6 +311,10 @@ public class CodeAgentLoopService {
         }
     }
 
+    //endregion
+
+    //region 【F】复杂任务计划 → 工作记忆步骤
+
     /**
      * 把 Plan 的 ToolExecutionRequest 列表转成 WorkingMemory.StepRecord。
      *
@@ -315,9 +340,9 @@ public class CodeAgentLoopService {
         return records;
     }
 
-    // ================================================================
-    // 带引用的执行入口（T5）
-    // ================================================================
+    //endregion
+
+    //region 【G】带引用的执行入口（返回正文 + citations）
 
     /**
      * 带引用的执行入口：返回 {@link AgentResponse}（正文 + citations）。
@@ -427,9 +452,9 @@ public class CodeAgentLoopService {
         return citations;
     }
 
-    // ================================================================
-    // 反思闭环
-    // ================================================================
+    //endregion
+
+    //region 【H】反思闭环
 
     private String applyReflexion(String sessionId, String userMessage, String response) {
         if (!reflexionEnabled) {
@@ -508,9 +533,9 @@ public class CodeAgentLoopService {
                 || lower.contains("review") || lower.contains("检查");
     }
 
-    // ================================================================
-    // 记忆 / 提示词
-    // ================================================================
+    //endregion
+
+    //region 【I】记忆与系统提示词构建
 
     private ChatMemory memoryOf(String sessionId) {
         // 直接从 SessionManager 拿会话里绑定的 ChatMemory
@@ -547,6 +572,10 @@ public class CodeAgentLoopService {
         return sb.toString();
     }
 
+    //endregion
+
+    //region 【J】生命周期与资源回收
+
     @PreDestroy
     public void shutdown() {
         this.shuttingDown = true;
@@ -579,9 +608,9 @@ public class CodeAgentLoopService {
         });
     }
 
-    // ================================================================
-    // 辅助
-    // ================================================================
+    //endregion
+
+    //region 【K】辅助与状态管理
 
     private String formatMemoryContext(List<MemoryDocument> memories) {
         if (memories == null || memories.isEmpty()) {
@@ -659,4 +688,6 @@ public class CodeAgentLoopService {
             }
         }
     }
+
+    //endregion
 }

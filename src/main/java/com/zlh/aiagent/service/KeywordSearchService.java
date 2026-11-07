@@ -37,6 +37,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @Service
 public class KeywordSearchService {
 
+    //region 【A】依赖与索引状态
+
     @Autowired
     private DegradationLogger degradationLogger;
 
@@ -51,6 +53,10 @@ public class KeywordSearchService {
     // 代码片段缓存
     private final List<RetrievedCode> codeCache = new CopyOnWriteArrayList<>();
 
+    //endregion
+
+    //region 【B】生命周期：初始化
+
     @PostConstruct
     public void init() {
         try {
@@ -61,6 +67,10 @@ public class KeywordSearchService {
             log.error("关键词检索服务初始化失败", e);
         }
     }
+
+    //endregion
+
+    //region 【C】索引构建
 
     /**
      * 构建关键词索引（幂等：重复调用会重建而非叠加）。
@@ -104,6 +114,10 @@ public class KeywordSearchService {
             log.error("构建关键词索引失败", e);
         }
     }
+
+    //endregion
+
+    //region 【D】关键词检索（BM25）
 
     /**
      * 关键词检索（BM25）。
@@ -154,6 +168,10 @@ public class KeywordSearchService {
         }
     }
 
+    //endregion
+
+    //region 【E】生命周期：销毁与资源释放
+
     @PreDestroy
     public void destroy() {
         log.info("Shutting down KeywordSearchService, closing Lucene resources");
@@ -183,6 +201,10 @@ public class KeywordSearchService {
         }
     }
 
+    //endregion
+
+    //region 【F】字段辅助与状态查询
+
     private void addIfNotNull(Document doc, String field, String value) {
         if (value != null && !value.isEmpty()) {
             doc.add(new TextField(field, value, Field.Store.NO));
@@ -190,4 +212,6 @@ public class KeywordSearchService {
     }
 
     public boolean isIndexReady() { return searcher != null; }
+
+    //endregion
 }

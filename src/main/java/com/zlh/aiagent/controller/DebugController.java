@@ -5,6 +5,7 @@ import com.zlh.aiagent.data.CallRelation;
 import com.zlh.aiagent.data.EvaluationResult;
 import com.zlh.aiagent.data.RetrievedCode;
 import com.zlh.aiagent.service.*;
+import com.zlh.aiagent.service.graph.ClassIndexService;
 import com.zlh.aiagent.service.subagent.SubAgentScheduler;
 import com.zlh.aiagent.tools.ProjectStructureTool;
 import lombok.extern.slf4j.Slf4j;
@@ -55,6 +56,9 @@ public class DebugController {
 
     @Autowired
     private ProjectStructureTool projectStructureTool;
+
+    @Autowired
+    private ClassIndexService classIndexService;
 
     // ============================================================
     // 1. 会话管理测试
@@ -454,6 +458,27 @@ public class DebugController {
                 "affectedCount", affected.size(),
                 "affected", affected,
                 "report", report
+        );
+    }
+
+    @GetMapping("/kg/class/stats")
+    public Map<String, Object> classIndexStats() {
+        return Map.of(
+                "success", true,
+                "stats", classIndexService.getStats()
+        );
+    }
+
+    @GetMapping("/kg/class/implementations")
+    public Map<String, Object> getImplementations(@RequestParam String interfaceName) {
+        var impls = classIndexService.getImplementations(interfaceName);
+        return Map.of(
+                "success", true,
+                "interfaceName", interfaceName,
+                "count", impls.size(),
+                "implementations", impls.stream()
+                        .map(n -> Map.of("className", n.getClassName(), "project", n.getProject()))
+                        .toList()
         );
     }
 

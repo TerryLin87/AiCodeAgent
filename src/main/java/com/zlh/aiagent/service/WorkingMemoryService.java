@@ -9,11 +9,36 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * 工作记忆服务。
+ *
+ * <p>职责：为每个会话维护"本轮任务目标 + 步骤清单 + 执行进度"的工作记忆，供主链路在每轮
+ * 开始时读取、执行中更新、构建 SystemPrompt 时渲染，避免重复已完成步骤。
+ *
+ * <p>功能分区：
+ * <ul>
+ *   <li>【A】存储结构</li>
+ *   <li>【B】工作记忆的创建与获取</li>
+ *   <li>【C】工作记忆更新</li>
+ *   <li>【D】清理与统计</li>
+ *   <li>【E】获取或创建</li>
+ *   <li>【F】步骤列表初始化</li>
+ *   <li>【G】渲染到 SystemPrompt</li>
+ *   <li>【H】按工具调用更新进度</li>
+ * </ul>
+ */
 @Slf4j
 @Service
 public class WorkingMemoryService {
+
+    //region 【A】存储结构
+
     // 存储所有会话的工作记忆
     private final Map<String, WorkingMemory> memoryStore = new ConcurrentHashMap<>();
+
+    //endregion
+
+    //region 【B】工作记忆的创建与获取
 
     /**
      * 创建工作记忆
@@ -42,6 +67,10 @@ public class WorkingMemoryService {
     public WorkingMemory get(String sessionId) {
         return memoryStore.get(sessionId);
     }
+
+    //endregion
+
+    //region 【C】工作记忆更新
 
     /**
      * 更新工作记忆
@@ -76,6 +105,10 @@ public class WorkingMemoryService {
         return null;
     }
 
+    //endregion
+
+    //region 【D】清理与统计
+
     /**
      * 清除工作记忆
      */
@@ -101,6 +134,10 @@ public class WorkingMemoryService {
         return stats;
     }
 
+    //endregion
+
+    //region 【E】获取或创建
+
     /**
      * 获取或创建：会话已有工作记忆则返回，否则用 goal 新建。
      *
@@ -117,6 +154,10 @@ public class WorkingMemoryService {
         }
         return create(sessionId, goal);
     }
+
+    //endregion
+
+    //region 【F】步骤列表初始化
 
     /**
      * 用 Plan 结果初始化步骤列表。
@@ -139,6 +180,10 @@ public class WorkingMemoryService {
         memoryStore.put(sessionId, memory);
         log.info("初始化工作记忆步骤: session={}, total={}", sessionId, planSteps.size());
     }
+
+    //endregion
+
+    //region 【G】渲染到 SystemPrompt
 
     /**
      * 把工作记忆渲染成 SystemPrompt 片段。
@@ -182,6 +227,10 @@ public class WorkingMemoryService {
         return sb.toString();
     }
 
+    //endregion
+
+    //region 【H】按工具调用更新进度
+
     /**
      * 按 action 名匹配步骤，标记为 COMPLETED。
      *
@@ -214,4 +263,6 @@ public class WorkingMemoryService {
         }
         return false;
     }
+
+    //endregion
 }

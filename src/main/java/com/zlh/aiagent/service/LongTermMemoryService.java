@@ -45,6 +45,8 @@ import java.util.stream.Collectors;
 @Service
 public class LongTermMemoryService {
 
+    //region 【A】依赖注入与配置常量
+
     @Autowired
     @Qualifier("chatMemoryStore")
     private MilvusEmbeddingStore embeddingStore;
@@ -64,6 +66,10 @@ public class LongTermMemoryService {
 
     private static final String COLLECTION_NAME = "chat_memory";
     private final Semaphore embeddingSemaphore = new Semaphore(2);
+
+    //endregion
+
+    //region 【B】写入长期记忆（带去重）
 
     /**
      * 将一段对话存入长期记忆（带写入前去重）。
@@ -134,6 +140,10 @@ public class LongTermMemoryService {
         }
     }
 
+    //endregion
+
+    //region 【C】检索相关历史记忆
+
     /**
      * 检索相关的历史记忆（跨会话）。
      */
@@ -177,6 +187,10 @@ public class LongTermMemoryService {
         }
     }
 
+    //endregion
+
+    //region 【D】清空会话记忆
+
     /**
      * 清空指定会话的记忆（可通过 metadata filter 实现，这里留作扩展点）。
      */
@@ -184,8 +198,14 @@ public class LongTermMemoryService {
         log.warn("清空会话 {} 的长期记忆功能待实现（需 Milvus metadata filter 支持）", sessionId);
     }
 
+    //endregion
+
+    //region 【E】工具方法
+
     private static String truncate(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max) + "...";
     }
+
+    //endregion
 }

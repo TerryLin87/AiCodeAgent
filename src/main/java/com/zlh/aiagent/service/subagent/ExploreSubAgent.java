@@ -4,11 +4,11 @@ import com.zlh.aiagent.data.CallRelation;
 import com.zlh.aiagent.data.RetrievalResult;
 import com.zlh.aiagent.data.RetrievedCode;
 import com.zlh.aiagent.data.subagent.SubAgentResult;
+import com.zlh.aiagent.instances.IMcpToolInvoker;
 import com.zlh.aiagent.instances.subagent.ISubAgent;
 import com.zlh.aiagent.service.CallRelationService;
 import com.zlh.aiagent.service.CodeRetrievalService;
 import com.zlh.aiagent.tools.ProjectStructureTool;
-import com.zlh.aiagent.tools.ReadFileTool;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -37,13 +37,13 @@ public class ExploreSubAgent implements ISubAgent {
     private CodeRetrievalService retrievalService;
 
     @Autowired
-    private ReadFileTool fileSystemTools;
-
-    @Autowired
     private ProjectStructureTool projectStructureTool;
 
     @Autowired
     private CallRelationService callRelationService;
+
+    @Autowired
+    private IMcpToolInvoker mcpInvoker;
 
     // ==================== 正则 ====================
 
@@ -211,12 +211,13 @@ public class ExploreSubAgent implements ISubAgent {
 
     private String doReadFile(TaskIntent intent) {
         String path = intent.getPath();
-        log.info("探索子agent读取文件：{}", path);
+        log.info("探索子agent读取文件（MCP）: {}", path);
         if (path == null || path.isBlank()) {
             return "未能从任务描述中识别出文件路径。请在任务中给出明确路径（如 src/main/java/.../UserService.java），"
                     + "或在 context 中传入 path。";
         }
-        return fileSystemTools.readFile(path);
+        // 统一走 MCP readFile（参数名 relativePath 必须和 MCP Server 的方法参数名一致）
+        return mcpInvoker.invoke("readFile", Map.of("relativePath", path));
     }
 
     private String doGetStructure(TaskIntent intent) {
