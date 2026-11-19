@@ -6,6 +6,7 @@ import com.zlh.aiagent.instances.IToolPlugin;
 import com.zlh.aiagent.instances.subagent.ISubAgent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zlh.aiagent.utils.CancellationToken;
 import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.AiMessage;
@@ -25,6 +26,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Method;
@@ -50,6 +52,7 @@ public class PlanSubAgent implements ISubAgent {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Autowired
+    @Lazy
     private List<IToolPlugin> toolPlugins;
 
     @Autowired
@@ -142,11 +145,11 @@ public class PlanSubAgent implements ISubAgent {
     @Override
     public boolean canHandle(String task) {
         if (task == null || task.isBlank()) return false;
+        List<String> keywords = domainConfig != null && domainConfig.getPlanKeywords() != null
+                ? domainConfig.getPlanKeywords()
+                : Arrays.asList("规划", "方案", "拆解", "分步", "怎么实现", "如何实现", "重构", "步骤");
         String lower = task.toLowerCase();
-        return lower.contains("规划") || lower.contains("方案")
-                || lower.contains("拆解") || lower.contains("分步")
-                || lower.contains("怎么实现") || lower.contains("如何实现")
-                || lower.contains("重构") || lower.contains("步骤");
+        return keywords.stream().anyMatch(lower::contains);
     }
 
     @Override
@@ -176,36 +179,47 @@ public class PlanSubAgent implements ISubAgent {
     // ================================================================
 
     public AiMessage plan(String task) {
+        return plan(task, null);
+    }
+
+    public AiMessage plan(String task, CancellationToken cancelToken) {
         if (task == null || task.isBlank()) {
             return AiMessage.from("任务为空，未生成计划。", List.of());
         }
 
-        // 如果动作清单为空（比如工具没注册），先尝试重收集一次
         if (availableActions.isEmpty()) {
             collectAvailableActions();
         }
 
+        if (cancelToken != null) cancelToken.throwIfCancelled();
+
         try {
-            ChatResponse response = chatModel.chat(ChatRequest.builder()
+            ChatResponse response = ((com.zlh.aiagent.model.DeepSeekModel) chatModel).doChat(ChatRequest.builder()
                     .messages(List.of(
                             SystemMessage.from(plannerSystemPrompt()),
                             UserMessage.from(task)))
                     .responseFormat(planResponseFormat())
-                    .build());
+                    .build(), com.zlh.aiagent.enums.CallType.PLAN, null, cancelToken);
             logUsage("json-schema", response);
             return parsePlan(response.aiMessage().text());
+        } catch (CancellationToken.CancelledException ce) {
+            throw ce;
         } catch (Exception e) {
             log.warn("【PlanSubAgent】JSON Schema 结构化输出失败，降级为提示词约束模式：{}", e.getMessage());
         }
 
+        if (cancelToken != null) cancelToken.throwIfCancelled();
+
         try {
-            ChatResponse response = chatModel.chat(ChatRequest.builder()
+            ChatResponse response = ((com.zlh.aiagent.model.DeepSeekModel) chatModel).doChat(ChatRequest.builder()
                     .messages(List.of(
                             SystemMessage.from(plannerSystemPrompt() + "\n再次强调：只输出 JSON，不要任何多余文字。"),
                             UserMessage.from(task)))
-                    .build());
+                    .build(), com.zlh.aiagent.enums.CallType.PLAN, null, cancelToken);
             logUsage("prompt-only", response);
             return parsePlan(response.aiMessage().text());
+        } catch (CancellationToken.CancelledException ce) {
+            throw ce;
         } catch (Exception e) {
             log.error("【PlanSubAgent】生成结构化计划失败，返回单步兜底计划", e);
             return fallbackPlan(task);

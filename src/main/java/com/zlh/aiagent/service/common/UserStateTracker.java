@@ -87,8 +87,9 @@ public class UserStateTracker {
         List<StateChange> history = stateHistory.getOrDefault(sessionId, List.of());
         if (history.isEmpty()) return null;
 
-        // 匹配“第二个”、“第2个”
-        Matcher numMatcher = Pattern.compile("第\\s*([0-9一二三四五]+)\\s*个").matcher(userMessage);
+        // 正则：第\s*([0-9一二三四五六七八九十]+)\s*个
+        Matcher numMatcher = Pattern.compile("第\\s*([0-9一二三四五六七八九十]+)\\s*个").matcher(userMessage);
+
         if (numMatcher.find()) {
             int index = parseChineseNumber(numMatcher.group(1));
             if (index > 0 && index <= history.size()) {
@@ -114,14 +115,27 @@ public class UserStateTracker {
 
     /** 中文数字（一~五）转 int，无法识别返回 -1。 */
     private int parseChineseNumber(String s) {
-        return switch (s) {
-            case "一", "1" -> 1;
-            case "二", "2" -> 2;
-            case "三", "3" -> 3;
-            case "四", "4" -> 4;
-            case "五", "5" -> 5;
-            default -> -1;
-        };
+        if (s == null || s.isEmpty()) return -1;
+        if (s.matches("\\d+")) {
+            return Integer.parseInt(s);
+        }
+        String digits = "一二三四五六七八九";
+        if ("十".equals(s)) return 10;
+        if (s.length() == 1) {
+            int idx = digits.indexOf(s);
+            return idx >= 0 ? idx + 1 : -1;
+        }
+        if (s.charAt(0) == '十') {
+            int idx = digits.indexOf(s.charAt(1));
+            return idx >= 0 ? 10 + idx + 1 : -1;
+        }
+        int tens = digits.indexOf(s.charAt(0));
+        if (tens >= 0 && s.charAt(1) == '十') {
+            if (s.length() == 2) return (tens + 1) * 10;
+            int idx = digits.indexOf(s.charAt(2));
+            if (idx >= 0) return (tens + 1) * 10 + idx + 1;
+        }
+        return -1;
     }
 
     //endregion

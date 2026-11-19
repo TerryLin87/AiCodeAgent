@@ -11,6 +11,7 @@ import dev.langchain4j.agent.tool.Tool;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -29,6 +30,7 @@ public class AgentTools {
     private ProjectStructureTool projectStructureTool;
 
     @Autowired
+    @Lazy
     private SubAgentScheduler subAgentScheduler;
 
     @Autowired
@@ -386,8 +388,6 @@ public class AgentTools {
                         .timestamp(java.time.LocalDateTime.now())
                         .build());
             }
-            log.info("工具调用: session={}, tool={}, cost={}ms, success={}",
-                    sessionId, toolName, cost, success);
         }
         return result;
     }

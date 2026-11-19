@@ -8,6 +8,7 @@ import com.zlh.aiagent.service.code.JavaCodeParser;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
@@ -59,6 +60,8 @@ public class ClassIndexService {
     @Getter
     private volatile boolean built = false;
 
+    @Value("${agent.milvus.max-top-k:16384}")
+    private int maxTopK;
     /**
      * 启动时构建索引。
      *
@@ -72,7 +75,7 @@ public class ClassIndexService {
             long start = System.currentTimeMillis();
 
             // 从 Milvus 拉所有 class 级片段（limit 10000，覆盖大部分项目）
-            List<RetrievedCode> segments = retrievalService.getAllSegments(null, 10000);
+            List<RetrievedCode> segments = retrievalService.getAllSegments(null, maxTopK);
             if (segments.isEmpty()) {
                 log.warn("Milvus 无数据，类级索引为空");
                 built = true;

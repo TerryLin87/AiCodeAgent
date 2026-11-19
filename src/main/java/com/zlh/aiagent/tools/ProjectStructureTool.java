@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Slf4j
 @Service
@@ -165,9 +166,8 @@ public class ProjectStructureTool {
         if (subProjectsPath != null && !subProjectsPath.isEmpty()) {
             Path subProjectsDir = Paths.get(subProjectsPath);
             if (Files.exists(subProjectsDir)) {
-                try {
-                    Files.list(subProjectsDir)
-                            .filter(Files::isDirectory)
+                try (Stream<Path> dirs = Files.list(subProjectsDir)) {
+                    dirs.filter(Files::isDirectory)
                             .forEach(projectDir -> {
                                 String projectName = projectDir.getFileName().toString();
                                 projects.add(new ProjectInfo(projectName, projectDir.toString()));

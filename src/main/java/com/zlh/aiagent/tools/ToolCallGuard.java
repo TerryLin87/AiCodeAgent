@@ -3,9 +3,11 @@ package com.zlh.aiagent.tools;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.extern.slf4j.Slf4j;
+import org.jetbrains.annotations.NotNull;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.Nullable;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -23,12 +25,20 @@ public class ToolCallGuard {
     @Value("${agent.tool.max-calls-per-session:15}")
     private int defaultMaxCalls;
 
+    @Value("${agent.tool.max-repeat-same-call:3}")
+    private int maxRepeatSameCall;
+
     /** 按工具名覆盖的限额，例如 readFile=5, searchCode=5, delegateToSubAgent=3 */
     @Value("#{${agent.tool.per-tool-limits:{'readFile':5,'searchCode':5,'delegateToSubAgent':3}}}")
     private Map<String, Integer> perToolLimits;
 
     /** key = sessionId + ":" + toolName */
     private final Cache<String, AtomicInteger> counters = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterAccess(30, TimeUnit.MINUTES)
+            .build();
+
+    private final Cache<String, AtomicInteger> repeatCounters = Caffeine.newBuilder()
             .maximumSize(10_000)
             .expireAfterAccess(30, TimeUnit.MINUTES)
             .build();
@@ -127,5 +137,12 @@ public class ToolCallGuard {
                 .map(k -> k.substring(0, Math.max(0, k.indexOf(':'))))
                 .distinct()
                 .count();
+    }
+
+    /** 同一会话内"工具 + 参数签名"连续命中超过阈值即判定为循环。 */
+    public boolean tryAcquireSameSignature(String sessionId, String signature) {
+        String key = sessionId + ":" + signature;
+        AtomicInteger c = repeatCounters.get(key, k -> new AtomicInteger(0));
+        return c == null || c.incrementAndGet() <= maxRepeatSameCall;
     }
 }

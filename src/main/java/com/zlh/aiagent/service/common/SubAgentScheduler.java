@@ -23,7 +23,7 @@ public class SubAgentScheduler {
 
     private final Map<String, ISubAgent> agents = new LinkedHashMap<>();
 
-    @Autowired
+    @Autowired(required = false)
     private List<ISubAgent> agentList;
 
     @Autowired
@@ -34,6 +34,10 @@ public class SubAgentScheduler {
 
     @PostConstruct
     public void init() {
+        if (agentList == null) {
+            agentList = java.util.Collections.emptyList();
+        }
+
         String currentDomain = domainConfig.getName();
         for (ISubAgent agent : agentList) {
             // 只注册"通用"或"匹配当前领域"的子 Agent

@@ -1,10 +1,14 @@
 package com.zlh.aiagent.data.common;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.zlh.aiagent.utils.ChatMessageCodec;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
+import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -18,6 +22,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Data
 @Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class AgentSession {
     /**
      * 会话唯一标识
@@ -47,17 +53,25 @@ public class AgentSession {
     /**
      * 直接持有ChatMemory
      */
+    @JsonIgnore
     private ChatMemory chatMemory;
 
     /**
      * 工作记忆（当前任务的中间状态）
      */
+    @JsonIgnore
     private WorkingMemory workingMemory;
 
     /**
      * 会话上下文（项目名、业务偏好等）
      */
     private Map<String, Object> context;
+
+    /**
+     * 可序列化的消息快照，仅用于持久化：
+     * put 前由 snapshotMessages() 写入，get 后由 rebuildChatMemory() 消费
+     */
+    private List<String> messageHistory;
 
     /**
      * 当前执行状态
@@ -74,6 +88,7 @@ public class AgentSession {
     /**
      * 执行状态
      */
+    @Data
     public static class ExecutionState {
         private String currentPhase;        // planning/executing/observing/reflecting
         private int iteration;              // 当前迭代次数
@@ -98,6 +113,7 @@ public class AgentSession {
     /**
      * 获取所有消息
      */
+    @JsonIgnore
     public synchronized List<ChatMessage> getMessages(){
         if(this.chatMemory == null){
             return new ArrayList<>();
@@ -142,6 +158,25 @@ public class AgentSession {
         this.lastAccessAt = LocalDateTime.now();
     }
 
+    /** 序列化前调用：把 chatMemory 中的消息拍平成字符串列表 */
+    public synchronized void snapshotMessages() {
+        this.messageHistory = ChatMessageCodec.encodeAll(getMessages());
+    }
+
+    /** 反序列化后调用：用 messageHistory 重建 chatMemory */
+    public synchronized void rebuildChatMemory() {
+        if (this.messageHistory == null) {
+            return;
+        }
+        ChatMemory memory = MessageWindowChatMemory.builder()
+                .maxMessages(50)
+                .build();
+        for (ChatMessage msg : ChatMessageCodec.decodeAll(this.messageHistory)) {
+            memory.add(msg);
+        }
+        this.chatMemory = memory;
+    }
+
     /**
      * 更新上下文
      */
@@ -156,6 +191,7 @@ public class AgentSession {
     /**
      * 判断会话是否过期（超过30分钟无操作）
      */
+    @JsonIgnore
     public boolean isExpired() {
         if (lastAccessAt == null) {
             return false;
@@ -166,6 +202,7 @@ public class AgentSession {
     /**
      * 判断会话是否达到最大消息数（防止内存溢出）
      */
+    @JsonIgnore
     public boolean isFull() {
         if (this.chatMemory == null) {
             return false;

@@ -28,6 +28,9 @@ public class AgentResponse {
     /** 本轮执行总耗时（毫秒） */
     private long executionTimeMs;
 
+    /** 本次请求是否被取消：true 表示因用户主动取消或连接断开而中止，content 一般为取消提示语 */
+    private boolean cancelled;
+
     /** 扩展元数据：评估分、token 用量、passed 等，key 由调用方约定 */
     private Map<String, Object> metadata;
 

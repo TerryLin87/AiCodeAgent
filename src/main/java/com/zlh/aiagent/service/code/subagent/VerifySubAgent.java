@@ -1,5 +1,6 @@
 package com.zlh.aiagent.service.code.subagent;
 
+import com.hankcs.hanlp.HanLP;
 import com.zlh.aiagent.data.common.EvaluationResult;
 import com.zlh.aiagent.data.common.subagent.SubAgentResult;
 import com.zlh.aiagent.instances.subagent.ISubAgent;
@@ -10,14 +11,20 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Component
 //只有当配置文件里面配置的环境是code时才会加载该子agent
 @ConditionalOnProperty(name = "agent.domain.name", havingValue = "code", matchIfMissing = true)
 public class VerifySubAgent implements ISubAgent {
+
+    private static final Pattern EN_TOKEN = Pattern.compile("[A-Za-z][A-Za-z0-9_]*|\\d+[A-Za-z_][A-Za-z0-9_]*");
+    private static final Pattern ZH_SEG   = Pattern.compile("[\\u4e00-\\u9fa5\\u3400-\\u4dbf]{2,}");
+    private static final int MAX_KEYWORDS = 20;
 
     @Autowired
     public SelfEvaluationService selfEvaluationService;
@@ -94,7 +101,7 @@ public class VerifySubAgent implements ISubAgent {
         }
 
         // 检查是否包含关键词（简单判断）
-        String[] keywords = extractKeywords(requirement);
+        List<String> keywords = extractKeywords(requirement);
         int found = 0;
         for (String keyword : keywords) {
             if (content.contains(keyword)) {
@@ -104,7 +111,7 @@ public class VerifySubAgent implements ISubAgent {
 
         if (found > 0) {
             sb.append("包含 ").append(found).append("/")
-                    .append(keywords.length).append(" 个关键词\n");
+                    .append(keywords.size()).append(" 个关键词\n");
         } else {
             sb.append("未找到任何关键词\n");
         }
@@ -112,8 +119,61 @@ public class VerifySubAgent implements ISubAgent {
         return sb.toString();
     }
 
-    private String[] extractKeywords(String requirement) {
-        // 简单提取，实际可以用 NLP
-        return requirement.split(" ");
+    //后续可以改成经过llm的版本
+    private List<String> extractKeywords(String requirement) {
+        if (requirement == null || requirement.trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // 第一层：分词 + 停用词过滤（HanLP 内部处理了常见停用词）
+        // 第二层：TextRank 打分，直接出结果
+        // HanLP 的 extractKeyword 底层就是 TextRank[citation:2][citation:7]
+        List<String> keywords = HanLP.extractKeyword(requirement, 20);
+
+        // 后处理：去重（HanLP 已做）、过滤纯数字、限制长度
+        return keywords.stream()
+                .filter(k -> k.length() >= 2)          // 过滤单字
+                .filter(k -> !k.matches("\\d+"))       // 过滤纯数字
+                .limit(20)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * 增强版：先用 TextRank 出候选，再按需交给 LLM 重排。
+     * 这个方法可以做成异步，或者只在特定业务场景调用。
+     */
+    private List<String> extractWithLlmEnhancement(String requirement) {
+        // 先拿一个较大的候选集
+        List<String> candidates = HanLP.extractKeyword(requirement, 50);
+        if (candidates.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // 如果候选词质量已经够好（比如前几个词长度都 >= 3 且非纯通用词），直接返回
+        // 这里省略业务判断逻辑，核心是：不是每次都需要 LLM
+
+        try {
+            // 调用 LLM：把候选词和原文一起给模型，让它选出最相关的 Top 20
+            // 必须设超时（比如 2 秒），失败抛异常
+            List<String> llmResult = callLlmForRerank(requirement, candidates);
+            if (llmResult != null && !llmResult.isEmpty()) {
+                return llmResult;
+            }
+        } catch (Exception e) {
+            // 熔断/降级：LLM 挂了就用 TextRank 结果，保证可用性
+            // 这里可以打日志、上报监控
+        }
+
+        // 降级返回 TextRank 候选的前 20 个
+        return candidates.stream().limit(20).collect(Collectors.toList());
+    }
+
+    // 示意方法，实际实现取决于你用的 LLM 客户端
+    private List<String> callLlmForRerank(String text, List<String> candidates) {
+        // 构造 prompt：要求从候选词中选出最相关的，并以 JSON 数组返回
+        // 注意：prompt 里强调 "keyphrase" 比 "keyword" 效果通常更好[citation:4]
+        // 并且要求 "exact phrases that occur in the input text"
+        // 实现略
+        return null;
     }
 }

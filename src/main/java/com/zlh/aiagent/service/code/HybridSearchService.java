@@ -52,6 +52,8 @@ public class HybridSearchService {
     @Value("${search.hybrid.keyword-weight:0.4}")
     private double keywordWeight;
 
+    @Value("${agent.milvus.max-top-k:16384}")
+    private int maxTopK;
     //endregion
 
     //region 【B】混合检索入口
@@ -151,8 +153,12 @@ public class HybridSearchService {
      */
     public void buildKeywordIndex() {
         // 从 Milvus 加载所有代码
-        List<RetrievedCode> allCode = semanticSearchService.getAllSegments(null, 10000);
+        List<RetrievedCode> allCode = semanticSearchService.getAllSegments(null, maxTopK);
         if (!allCode.isEmpty()) {
+            if (allCode.size() >= maxTopK) {
+                log.warn("关键词索引可能不完整：取回 {} 条已达上限 {}，建议调大 agent.milvus.max-top-k",
+                        allCode.size(), maxTopK);
+            }
             keywordSearchService.buildIndex(allCode);
             log.info("关键词索引构建完成，共 {} 条记录", allCode.size());
         }

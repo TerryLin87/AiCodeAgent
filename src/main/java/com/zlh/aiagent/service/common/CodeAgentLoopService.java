@@ -4,6 +4,9 @@ import com.zlh.aiagent.config.DomainConfig;
 import com.zlh.aiagent.data.common.*;
 import com.zlh.aiagent.data.common.http.AgentResponse;
 import com.zlh.aiagent.enums.AgentStatus;
+import com.zlh.aiagent.enums.CallType;
+import com.zlh.aiagent.instances.IAgentStreamCallback;
+import com.zlh.aiagent.instances.IStreamChatCallback;
 import com.zlh.aiagent.instances.IToolPlugin;
 import com.zlh.aiagent.model.DeepSeekModel;
 import com.zlh.aiagent.service.code.SelfEvaluationService;
@@ -11,13 +14,16 @@ import com.zlh.aiagent.service.code.subagent.PlanSubAgent;
 import com.zlh.aiagent.tools.AgentTools;
 import com.zlh.aiagent.tools.ToolCallGuard;
 import com.zlh.aiagent.tools.ToolCallTrace;
+import com.zlh.aiagent.utils.CancellationToken;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.mcp.McpToolProvider;
 import dev.langchain4j.memory.ChatMemory;
+import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.service.AiServices;
 import dev.langchain4j.service.MemoryId;
-import dev.langchain4j.service.UserMessage;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -31,6 +37,8 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -45,13 +53,15 @@ import java.util.stream.Collectors;
  *   <li>【B】依赖注入</li>
  *   <li>【C】配置项</li>
  *   <li>【D】Assistant 定义与初始化</li>
- *   <li>【E】主执行入口（全局/会话双层限流）</li>
+ *   <li>【E】主执行入口（全局/会话双层限流 + CancellationToken）</li>
  *   <li>【F】复杂任务计划 → 工作记忆步骤</li>
  *   <li>【G】带引用的执行入口（返回正文 + citations）</li>
+ *   <li>【G2】流式执行入口（SSE 用）</li>
  *   <li>【H】反思闭环</li>
  *   <li>【I】记忆与系统提示词构建</li>
  *   <li>【J】生命周期与资源回收</li>
  *   <li>【K】辅助与状态管理</li>
+ *   <li>【L】请求取消</li>
  * </ul>
  */
 @Slf4j
@@ -64,6 +74,10 @@ public class CodeAgentLoopService {
     private final Map<String, Semaphore> sessionSemaphores = new ConcurrentHashMap<>();
     private final Map<String, String> pendingMemoryContext = new ConcurrentHashMap<>();
     private final Map<String, String> pendingPlanContext = new ConcurrentHashMap<>();
+    /** sessionId -> 当前正在执行的 CancellationToken（供取消接口按 session 取消） */
+    private final Map<String, CancellationToken> activeTokens = new ConcurrentHashMap<>();
+    /** requestId -> sessionId（反向索引，/cancel by requestId 用） */
+    private final Map<String, String> requestToSession = new ConcurrentHashMap<>();
 
     private static final int MEMORY_WINDOW = 50;
     private static final int MAX_CACHED_MEMORIES = 1000;
@@ -85,7 +99,7 @@ public class CodeAgentLoopService {
     @Autowired
     private SessionManager sessionManager;
 
-    @Autowired
+    @Autowired(required = false)
     private PlanSubAgent planSubAgent;
 
     @Autowired
@@ -106,7 +120,6 @@ public class CodeAgentLoopService {
     @Autowired
     private DomainConfig domainConfig;
 
-    /** MCP 工具提供者（可选：MCP Server 没启动时为 null） */
     @Autowired(required = false)
     private McpToolProvider mcpToolProvider;
 
@@ -142,14 +155,13 @@ public class CodeAgentLoopService {
     //region 【D】Assistant 定义与初始化
 
     public interface CodingAssistant {
-        String chat(@MemoryId String sessionId, @UserMessage String message);
+        String chat(@MemoryId String sessionId, @dev.langchain4j.service.UserMessage String message);
     }
 
     private CodingAssistant assistant;
 
     @PostConstruct
     public void init() {
-        // 按当前领域筛选本地工具
         List<Object> activeTools = toolPlugins.stream()
                 .filter(p -> p.getDomainName().equals(domainConfig.getName()))
                 .flatMap(p -> p.getToolBeans().stream())
@@ -162,17 +174,14 @@ public class CodeAgentLoopService {
 
         var builder = AiServices.builder(CodingAssistant.class)
                 .chatModel(deepSeekModel)
-                // 改用 SessionManager 提供的 memory
                 .chatMemoryProvider(memoryId -> {
                     String sessionId = (String) memoryId;
                     return sessionManager.getOrCreateSession(sessionId).getChatMemory();
                 })
                 .systemMessageProvider(memoryId -> buildSystemPrompt((String) memoryId));
 
-        // 装配本地工具
         builder.tools(activeTools.toArray(new Object[0]));
 
-        // ★ 装配 MCP 工具（如果 MCP Server 可用）
         if (mcpToolProvider != null) {
             builder.toolProvider(mcpToolProvider);
             log.info("已接入 MCP 工具提供者");
@@ -192,37 +201,69 @@ public class CodeAgentLoopService {
 
     //endregion
 
-    //region 【E】主执行入口（全局/会话双层限流）
+    //region 【E】主执行入口（全局/会话双层限流 + 取消支持）
 
-    public String execute(String userMessage) throws InterruptedException {
+    public String execute(String userMessage) {
         return execute(UUID.randomUUID().toString(), userMessage);
     }
 
-    public String execute(String sessionId, String userMessage) throws InterruptedException {
-        if (!globalSemaphore.tryAcquire(5, TimeUnit.SECONDS)) {
-            log.warn("全局限流触发，拒绝请求");
-            return "系统繁忙，请稍后重试";
-        }
+    public String execute(String sessionId, String userMessage) {
+        return execute(sessionId, userMessage, null);
+    }
+
+    public String execute(String sessionId, String userMessage, CancellationToken cancelToken) {
+        boolean globalAcquired = false;
         try {
-            Semaphore sessionSem = sessionSemaphores.computeIfAbsent(sessionId, k -> new Semaphore(1));
-            if (!sessionSem.tryAcquire(3, TimeUnit.SECONDS)) {
-                log.warn("会话 {} 限流触发，拒绝请求", sessionId);
-                return "当前会话有请求正在处理，请稍后";
-            }
             try {
-                return doExecute(sessionId, userMessage);
-            } finally {
-                sessionSem.release();
+                if (!globalSemaphore.tryAcquire(5, TimeUnit.SECONDS)) {
+                    log.warn("全局限流触发，拒绝请求");
+                    return "系统繁忙，请稍后重试";
+                }
+                globalAcquired = true;
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return "请求已被取消";
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return "请求被中断";
+
+            CancellationToken effectiveToken = bindToken(sessionId, cancelToken);
+            try {
+                Semaphore sessionSem = sessionSemaphores.computeIfAbsent(sessionId, k -> new Semaphore(1));
+                boolean sessionAcquired = false;
+                try {
+                    try {
+                        if (!sessionSem.tryAcquire(3, TimeUnit.SECONDS)) {
+                            log.warn("会话 {} 限流触发，拒绝请求", sessionId);
+                            return "当前会话有请求正在处理，请稍后";
+                        }
+                        sessionAcquired = true;
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return "请求已被取消";
+                    }
+                    try {
+                        checkCancelled(effectiveToken);
+                        return doExecute(sessionId, userMessage, effectiveToken);
+                    } catch (CancellationToken.CancelledException e) {
+                        log.info("会话 {} 请求被取消: {}", sessionId, e.getMessage());
+                        return "请求已被取消";
+                    }
+                } finally {
+                    if (sessionAcquired) sessionSem.release();
+                }
+            } finally {
+                globalSemaphore.release();
+                unbindToken(sessionId, effectiveToken);
+            }
         } finally {
-            globalSemaphore.release();
+            // no-op
         }
     }
 
     public String doExecute(String sessionId, String userMessage) {
+        return doExecute(sessionId, userMessage, null);
+    }
+
+    public String doExecute(String sessionId, String userMessage, CancellationToken cancelToken) {
         log.info("Agent 开始执行: session={}, message={}", sessionId, userMessage);
         long startTime = System.currentTimeMillis();
 
@@ -231,19 +272,22 @@ public class CodeAgentLoopService {
         toolCallTrace.clear(sessionId);
 
         try {
+            checkCancelled(cancelToken);
+
             AgentSession session = sessionManager.getOrCreateSession(sessionId);
             log.info("会话状态: 消息数={}", session.getMessages().size());
 
             // 1. 上下文压缩检查
             ChatMemory memory = memoryOf(sessionId);
             if (contextCompressor.needsCompression(sessionId, memory.messages())) {
+                checkCancelled(cancelToken);
                 log.info("触发上下文压缩，压缩前消息数: {}", memory.messages().size());
                 List<ChatMessage> compressed = contextCompressor.compress(sessionId, memory.messages());
-
-                // 交给 SessionManager 进行原子替换
                 sessionManager.replaceSessionMemory(sessionId, compressed);
                 log.info("上下文压缩完成，压缩后消息数: {}", compressed.size());
             }
+
+            checkCancelled(cancelToken);
 
             // 2. 状态追踪与指代消解
             userStateTracker.recordState(sessionId, userMessage);
@@ -254,41 +298,57 @@ public class CodeAgentLoopService {
                 log.info("指代消解成功: {} -> {}", userMessage, resolvedRef);
             }
 
+            checkCancelled(cancelToken);
+
             // 3. 复杂任务规划 (Plan)
             if (planSubAgent != null && isComplex(userMessage)) {
+                checkCancelled(cancelToken);
                 long planStart = System.currentTimeMillis();
                 try {
-                    AiMessage plan = planSubAgent.plan(userMessage);
+                    // PlanSubAgent 内部最终也走 deepSeekModel.doChat；由于它注入的是同一个
+                    // DeepSeekModel Bean，我们在此线程把 cancelToken 透不过去（它是独立调用）。
+                    // 为了真正取消规划，需要把 token 传进 plan()；下面走可取消版本。
+                    AiMessage plan = planSubAgent.plan(userMessage, cancelToken);
                     String planText = plan != null ? plan.text() : null;
                     if (planText != null && !planText.isBlank()) {
                         pendingPlanContext.put(sessionId, planText);
                         log.info("复杂任务已生成执行计划，耗时 {}ms，计划长度 {}",
                                 System.currentTimeMillis() - planStart, planText.length());
-
-                        // 把计划步骤写入工作记忆
                         List<WorkingMemory.StepRecord> steps = toStepRecords(plan);
                         if (!steps.isEmpty()) {
                             workingMemoryService.initSteps(sessionId, userMessage, steps);
                         }
                     }
+                } catch (CancellationToken.CancelledException ce) {
+                    throw ce;
                 } catch (Exception e) {
                     log.warn("生成执行计划失败，按普通任务处理: {}", e.getMessage());
                 }
             }
+
+            checkCancelled(cancelToken);
 
             // 4. 长期记忆检索 (RAG)
             List<MemoryDocument> relevantMemories =
                     longTermMemoryService.retrieveRelevantMemories(userMessage, 3);
             pendingMemoryContext.put(sessionId, formatMemoryContext(relevantMemories));
 
+            checkCancelled(cancelToken);
+
             // 5. 正式调用模型 (带工具执行)
+            //    assistant.chat 走 AiServices 内部链，不会直接走我们的 doChat(token) 重载——
+            //    因此同步路径的取消是"轮询式"的：规划前、压缩前、反思前等节点检查。
+            //    如果需要细粒度中断同步工具循环，必须改走流式工具循环（C-3 下一阶段）。
             String response = assistant.chat(sessionId, finalUserMessage);
 
-            //工具轨迹 → 工作记忆步骤自动标记
+            checkCancelled(cancelToken);
+
             syncWorkingMemoryWithTrace(sessionId);
 
             // 6. 反思与自动修正
-            response = applyReflexion(sessionId, userMessage, response);
+            response = applyReflexion(sessionId, userMessage, response, cancelToken);
+
+            checkCancelled(cancelToken);
 
             // 7. 持久化记忆
             sessionManager.addUserMessage(sessionId, userMessage);
@@ -300,7 +360,11 @@ public class CodeAgentLoopService {
                     System.currentTimeMillis() - startTime, response.length());
             return response;
 
+        } catch (CancellationToken.CancelledException ce) {
+            log.info("会话 {} 执行被取消，不持久化本轮结果", sessionId);
+            throw ce;
         } catch (Exception e) {
+            if (e instanceof CancellationToken.CancelledException) throw e;
             log.error("Agent 执行异常", e);
             return "Agent 执行失败: " + e.getMessage() + "\n\n建议: " + getRecoverySuggestion(e);
         } finally {
@@ -314,11 +378,6 @@ public class CodeAgentLoopService {
 
     //region 【F】复杂任务计划 → 工作记忆步骤
 
-    /**
-     * 把 Plan 的 ToolExecutionRequest 列表转成 WorkingMemory.StepRecord。
-     *
-     * <p>Plan 生成的每一步 action 对应一个 StepRecord，初始状态为 PENDING。
-     */
     private List<WorkingMemory.StepRecord> toStepRecords(AiMessage plan) {
         if (plan == null || plan.toolExecutionRequests() == null
                 || plan.toolExecutionRequests().isEmpty()) {
@@ -332,7 +391,7 @@ public class CodeAgentLoopService {
                     .action(req.name())
                     .params(req.arguments())
                     .description(req.name() + "(" + req.arguments() + ")")
-                    .status(0)   // PENDING，按你 PlanStatus 枚举的 PENDING 值调整
+                    .status(0)
                     .timestamp(java.time.LocalDateTime.now())
                     .build());
         }
@@ -343,93 +402,117 @@ public class CodeAgentLoopService {
 
     //region 【G】带引用的执行入口（返回正文 + citations）
 
-    /**
-     * 带引用的执行入口：返回 {@link AgentResponse}（正文 + citations）。
-     *
-     * <p>与 {@link #execute(String, String)} 的区别：本方法在返回前会解析工具输出里的
-     * {@code [ref:...]} 标记，转换成结构化的 Citation 列表，并从正文中移除标记。
-     *
-     * @param sessionId   会话 ID
-     * @param userMessage 用户消息
-     * @return 含 citations 的响应
-     */
-    public AgentResponse executeWithCitations(String sessionId, String userMessage)
-            throws InterruptedException {
+    public AgentResponse executeWithCitations(String sessionId, String userMessage) {
+        return executeWithCitations(sessionId, userMessage, null);
+    }
+
+    public AgentResponse executeWithCitations(String sessionId, String userMessage,
+                                              CancellationToken cancelToken) {
         long start = System.currentTimeMillis();
+        boolean globalAcquired = false;
 
-        if (!globalSemaphore.tryAcquire(5, TimeUnit.SECONDS)) {
-            return AgentResponse.builder()
-                    .sessionId(sessionId)
-                    .content("系统繁忙，请稍后重试")
-                    .citations(List.of())
-                    .executionTimeMs(System.currentTimeMillis() - start)
-                    .build();
-        }
         try {
-            Semaphore sessionSem = sessionSemaphores.computeIfAbsent(sessionId, k -> new Semaphore(1));
-            if (!sessionSem.tryAcquire(3, TimeUnit.SECONDS)) {
-                return AgentResponse.builder()
-                        .sessionId(sessionId)
-                        .content("当前会话有请求正在处理，请稍后")
-                        .citations(List.of())
-                        .executionTimeMs(System.currentTimeMillis() - start)
-                        .build();
-            }
             try {
-                // 每轮开始前清空引用缓存，避免上一轮结果混入
-                agentTools.clearCitationCache();
-
-                String rawContent = doExecute(sessionId, userMessage);
-
-                // 解析 [ref:...] 并移除标记
-                List<Citation> citations = extractCitations(rawContent);
-                String cleanContent = rawContent == null ? ""
-                        : rawContent.replaceAll("\\n?\\[ref:[^\\]]+\\]", "").trim();
-
-                //填充工具轨迹 + 元数据
-                List<String> toolCalls = toolCallTrace.getToolNames(sessionId);
-                Map<String, Object> metadata = new HashMap<>();
-                WorkingMemory wm = workingMemoryService.get(sessionId);
-                if (wm != null) {
-                    metadata.put("goal", wm.getGoal());
-                    metadata.put("completedSteps", wm.getCompletedSteps());
-                    metadata.put("totalSteps", wm.getTotalSteps());
-                    metadata.put("currentPhase", wm.getCurrentPhase());
+                if (!globalSemaphore.tryAcquire(5, TimeUnit.SECONDS)) {
+                    return AgentResponse.builder()
+                            .sessionId(sessionId)
+                            .content("系统繁忙，请稍后重试")
+                            .citations(List.of())
+                            .cancelled(false)
+                            .executionTimeMs(System.currentTimeMillis() - start)
+                            .build();
                 }
-
+                globalAcquired = true;
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
                 return AgentResponse.builder()
                         .sessionId(sessionId)
-                        .content(cleanContent)
-                        .citations(citations)
-                        .toolCalls(toolCalls)
-                        .metadata(metadata)
+                        .content("请求已被取消")
+                        .citations(List.of())
+                        .cancelled(true)
                         .executionTimeMs(System.currentTimeMillis() - start)
                         .build();
-            } finally {
-                sessionSem.release();
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return AgentResponse.builder()
-                    .sessionId(sessionId)
-                    .content("请求被中断")
-                    .citations(List.of())
-                    .executionTimeMs(System.currentTimeMillis() - start)
-                    .build();
+
+            CancellationToken effectiveToken = bindToken(sessionId, cancelToken);
+            try {
+                Semaphore sessionSem = sessionSemaphores.computeIfAbsent(sessionId, k -> new Semaphore(1));
+                boolean sessionAcquired = false;
+                try {
+                    try {
+                        if (!sessionSem.tryAcquire(3, TimeUnit.SECONDS)) {
+                            return AgentResponse.builder()
+                                    .sessionId(sessionId)
+                                    .content("当前会话有请求正在处理，请稍后")
+                                    .citations(List.of())
+                                    .cancelled(false)
+                                    .executionTimeMs(System.currentTimeMillis() - start)
+                                    .build();
+                        }
+                        sessionAcquired = true;
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return AgentResponse.builder()
+                                .sessionId(sessionId)
+                                .content("请求已被取消")
+                                .citations(List.of())
+                                .cancelled(true)
+                                .executionTimeMs(System.currentTimeMillis() - start)
+                                .build();
+                    }
+
+                    try {
+                        checkCancelled(effectiveToken);
+                        agentTools.clearCitationCache();
+
+                        String rawContent = doExecute(sessionId, userMessage, effectiveToken);
+
+                        List<Citation> citations = extractCitations(rawContent);
+                        String cleanContent = rawContent == null ? ""
+                                : rawContent.replaceAll("\\n?\\[ref:[^\\]]+\\]", "").trim();
+
+                        List<String> toolCalls = toolCallTrace.getToolNames(sessionId);
+                        Map<String, Object> metadata = new HashMap<>();
+                        WorkingMemory wm = workingMemoryService.get(sessionId);
+                        if (wm != null) {
+                            metadata.put("goal", wm.getGoal());
+                            metadata.put("completedSteps", wm.getCompletedSteps());
+                            metadata.put("totalSteps", wm.getTotalSteps());
+                            metadata.put("currentPhase", wm.getCurrentPhase());
+                        }
+
+                        return AgentResponse.builder()
+                                .sessionId(sessionId)
+                                .content(cleanContent)
+                                .citations(citations)
+                                .toolCalls(toolCalls)
+                                .metadata(metadata)
+                                .cancelled(false)
+                                .executionTimeMs(System.currentTimeMillis() - start)
+                                .build();
+                    } catch (CancellationToken.CancelledException ce) {
+                        return AgentResponse.builder()
+                                .sessionId(sessionId)
+                                .content("请求已被取消")
+                                .citations(List.of())
+                                .cancelled(true)
+                                .executionTimeMs(System.currentTimeMillis() - start)
+                                .build();
+                    }
+                } finally {
+                    if (sessionAcquired) sessionSem.release();
+                }
+            } finally {
+                if (globalAcquired) globalSemaphore.release();
+                unbindToken(sessionId, effectiveToken);
+            }
         } finally {
-            globalSemaphore.release();
+            // no-op
         }
     }
 
-    /**
-     * 从响应正文里提取 {@code [ref:id1,id2]} 标记，转成 Citation 列表。
-     *
-     * @param content Agent 原始响应（含标记）
-     * @return 去重后的 Citation 列表，无标记时返回空列表
-     */
     private List<Citation> extractCitations(String content) {
         if (content == null || content.isBlank()) return List.of();
-
         Set<String> ids = new LinkedHashSet<>();
         Matcher m = Pattern.compile("\\[ref:([^\\]]+)\\]").matcher(content);
         while (m.find()) {
@@ -438,7 +521,6 @@ public class CodeAgentLoopService {
                 if (!trimmed.isEmpty()) ids.add(trimmed);
             }
         }
-
         Map<String, RetrievalResult> cache = agentTools.getCitationCache();
         List<Citation> citations = new ArrayList<>();
         for (String id : ids) {
@@ -453,16 +535,243 @@ public class CodeAgentLoopService {
 
     //endregion
 
+    //region 【G2】流式执行入口（SSE 用，支持取消）
+
+    public void streamExecute(String sessionId, String userMessage, IAgentStreamCallback callback) {
+        streamExecute(sessionId, userMessage, null, callback);
+    }
+
+    public void streamExecute(String sessionId, String userMessage,
+                              String requestId, IAgentStreamCallback callback) {
+        Objects.requireNonNull(callback, "callback cannot be null");
+
+        // 为流式请求创建全局可查的 CancellationToken，按 requestId 注册
+        CancellationToken token = requestId != null
+                ? CancellationToken.create(requestId)
+                : CancellationToken.create("req-" + sessionId + "-" + System.currentTimeMillis());
+
+        long startAcquire = System.currentTimeMillis();
+        CancellationToken effectiveToken = null;
+        boolean globalAcquired = false;
+
+        try {
+            try {
+                if (!globalSemaphore.tryAcquire(5, TimeUnit.SECONDS)) {
+                    log.warn("全局限流触发，拒绝流式请求");
+                    callback.onError(new RuntimeException("系统繁忙，请稍后重试"));
+                    return;
+                }
+                globalAcquired = true;
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                log.info("流式请求在等待全局限流时被中断, sessionId={}", sessionId);
+                token.cancel();
+                callback.onError(new CancellationToken.CancelledException("请求已被取消"));
+                return;
+            }
+
+            effectiveToken = bindToken(sessionId, token);
+            if (requestId != null) requestToSession.put(requestId, sessionId);
+
+            Semaphore sessionSem = sessionSemaphores.computeIfAbsent(sessionId, k -> new Semaphore(1));
+            boolean sessionAcquired = false;
+            try {
+                try {
+                    if (!sessionSem.tryAcquire(3, TimeUnit.SECONDS)) {
+                        log.warn("会话 {} 限流触发，拒绝流式请求", sessionId);
+                        callback.onError(new RuntimeException("当前会话有请求正在处理，请稍后"));
+                        return;
+                    }
+                    sessionAcquired = true;
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    log.info("流式请求在等待会话限流时被中断, sessionId={}", sessionId);
+                    token.cancel();
+                    callback.onError(new CancellationToken.CancelledException("请求已被取消"));
+                    return;
+                }
+                checkCancelled(effectiveToken);
+                doStreamExecute(sessionId, userMessage, callback, effectiveToken);
+            } finally {
+                if (sessionAcquired) sessionSem.release();
+            }
+        } finally {
+            if (globalAcquired) globalSemaphore.release();
+            if (requestId != null) requestToSession.remove(requestId);
+            if (effectiveToken != null) unbindToken(sessionId, effectiveToken);
+            token.dispose();
+            log.info("流式请求结束, sessionId={}, cost={}ms",
+                    sessionId, System.currentTimeMillis() - startAcquire);
+        }
+    }
+
+    private void doStreamExecute(String sessionId, String userMessage,
+                                 IAgentStreamCallback callback,
+                                 CancellationToken cancelToken) {
+        log.info("Agent 开始流式执行: session={}, message={}", sessionId, userMessage);
+
+        toolCallGuard.reset(sessionId);
+        ToolCallGuard.setCurrentSession(sessionId);
+        toolCallTrace.clear(sessionId);
+        agentTools.clearCitationCache();
+
+        final AtomicReference<Throwable> errorRef = new AtomicReference<>();
+        final AtomicReference<String> doneText = new AtomicReference<>();
+        final AtomicReference<List<ToolExecutionRequest>> toolCallsRef = new AtomicReference<>();
+        final AtomicBoolean cancelled = new AtomicBoolean(false);
+
+        try {
+            checkCancelled(cancelToken);
+
+            AgentSession session = sessionManager.getOrCreateSession(sessionId);
+            log.info("会话状态: 消息数={}", session.getMessages().size());
+
+            // 1. 上下文压缩
+            ChatMemory memory = memoryOf(sessionId);
+            if (contextCompressor.needsCompression(sessionId, memory.messages())) {
+                checkCancelled(cancelToken);
+                log.info("触发上下文压缩，压缩前消息数: {}", memory.messages().size());
+                callback.onEvent("event", "开始上下文压缩");
+                List<ChatMessage> compressed = contextCompressor.compress(sessionId, memory.messages());
+                sessionManager.replaceSessionMemory(sessionId, compressed);
+                log.info("上下文压缩完成，压缩后消息数: {}", compressed.size());
+            }
+
+            checkCancelled(cancelToken);
+
+            // 2. 指代消解
+            userStateTracker.recordState(sessionId, userMessage);
+            String resolvedRef = userStateTracker.resolveReference(sessionId, userMessage);
+            String finalUserMessage = userMessage;
+            if (resolvedRef != null) {
+                finalUserMessage = userMessage + "\n\n[系统提示：用户提到的指代实际是指：'" + resolvedRef + "']";
+                callback.onEvent("event", "已做指代消解");
+                log.info("指代消解成功: {} -> {}", userMessage, resolvedRef);
+            }
+
+            checkCancelled(cancelToken);
+
+            // 3. 复杂任务规划
+            if (planSubAgent != null && isComplex(userMessage)) {
+                checkCancelled(cancelToken);
+                callback.onEvent("plan", "开始生成执行计划");
+                try {
+                    AiMessage plan = planSubAgent.plan(userMessage, cancelToken);
+                    String planText = plan != null ? plan.text() : null;
+                    if (planText != null && !planText.isBlank()) {
+                        pendingPlanContext.put(sessionId, planText);
+                        log.info("复杂任务已生成执行计划");
+                        List<WorkingMemory.StepRecord> steps = toStepRecords(plan);
+                        if (!steps.isEmpty()) {
+                            workingMemoryService.initSteps(sessionId, userMessage, steps);
+                        }
+                        callback.onEvent("plan", "生成计划完成，步骤数:" + steps.size());
+                    }
+                } catch (CancellationToken.CancelledException ce) {
+                    throw ce;
+                } catch (Exception e) {
+                    log.warn("生成执行计划失败，按普通任务处理: {}", e.getMessage());
+                }
+            }
+
+            checkCancelled(cancelToken);
+
+            // 4. 长期记忆检索
+            List<MemoryDocument> relevantMemories =
+                    longTermMemoryService.retrieveRelevantMemories(userMessage, 3);
+            pendingMemoryContext.put(sessionId, formatMemoryContext(relevantMemories));
+
+            checkCancelled(cancelToken);
+
+            // 5. 构造 ChatRequest + 流式调用
+            ChatRequest chatRequest = buildChatRequest(session, finalUserMessage);
+
+            StringBuilder tokenBuf = new StringBuilder();
+            IStreamChatCallback modelCb = new IStreamChatCallback() {
+                @Override public void onToken(String token) {
+                    tokenBuf.append(token);
+                    callback.onToken(token);
+                }
+                @Override public void onCompleteToolCalls(List<ToolExecutionRequest> toolCalls) {
+                    toolCallsRef.set(toolCalls);
+                }
+                @Override public void onComplete() {
+                    doneText.set(tokenBuf.toString());
+                }
+                @Override public void onError(Throwable t) {
+                    errorRef.set(t);
+                }
+            };
+            deepSeekModel.streamChat(chatRequest, CallType.MAIN_CHAT, modelCb, cancelToken);
+
+            // 6. 返回后统一判断
+            if (errorRef.get() instanceof CancellationToken.CancelledException) {
+                cancelled.set(true);
+                return;
+            }
+            if (errorRef.get() != null) return;
+
+            List<ToolExecutionRequest> toolCalls = toolCallsRef.get();
+            String finalText = doneText.get();
+            if (toolCalls != null && !toolCalls.isEmpty()) {
+                callback.onToolCalls(toolCalls);
+                callback.onEvent("tool", "模型请求调用 " + toolCalls.size() + " 个工具");
+            } else if (finalText != null) {
+                callback.onEvent("event", "模型流式输出结束");
+            }
+
+            // 取消则不持久化
+            if (cancelToken != null && cancelToken.isCancelled()) {
+                cancelled.set(true);
+                return;
+            }
+
+            sessionManager.addUserMessage(sessionId, userMessage);
+            sessionManager.addAssistantMessage(sessionId, finalText == null ? "" : finalText);
+            syncWorkingMemoryWithTrace(sessionId);
+
+        } catch (CancellationToken.CancelledException ce) {
+            cancelled.set(true);
+            log.info("流式会话 {} 执行被取消", sessionId);
+        } catch (Throwable t) {
+            errorRef.compareAndSet(null, t);
+            log.error("流式执行异常, sessionId={}", sessionId, t);
+        } finally {
+            pendingMemoryContext.remove(sessionId);
+            pendingPlanContext.remove(sessionId);
+            ToolCallGuard.clearCurrentSession();
+        }
+
+        if (cancelled.get()) {
+            callback.onError(new CancellationToken.CancelledException("请求已取消"));
+        } else if (errorRef.get() != null) {
+            callback.onError(errorRef.get());
+        } else {
+            callback.onDone();
+        }
+    }
+
+    private ChatRequest buildChatRequest(AgentSession session, String userMessage) {
+        List<ChatMessage> msgs = new ArrayList<>(session.getChatMemory().messages());
+        msgs.add(new UserMessage(userMessage));
+        return ChatRequest.builder().messages(msgs).build();
+    }
+
+    //endregion
+
     //region 【H】反思闭环
 
     private String applyReflexion(String sessionId, String userMessage, String response) {
+        return applyReflexion(sessionId, userMessage, response, null);
+    }
+
+    private String applyReflexion(String sessionId, String userMessage, String response,
+                                  CancellationToken cancelToken) {
         if (!reflexionEnabled) {
             log.debug("会话 {} 反思已关闭，跳过", sessionId);
             return response;
         }
-        if (response == null || response.isBlank()) {
-            return response;
-        }
+        if (response == null || response.isBlank()) return response;
         if (!shouldReflect(userMessage)) {
             log.debug("会话 {} 任务类型不需要反思，跳过", sessionId);
             return response;
@@ -470,6 +779,7 @@ public class CodeAgentLoopService {
 
         long reflectStart = System.currentTimeMillis();
         try {
+            checkCancelled(cancelToken);
             EvaluationResult eval = evaluationService.evaluate(response, userMessage);
             log.info("会话 {} 反思评估: 总分={}, 通过={}",
                     sessionId, eval.getOverallScore(), eval.isPassed());
@@ -479,10 +789,9 @@ public class CodeAgentLoopService {
                         sessionId, reflexionMaxDurationMs);
                 return response;
             }
+            checkCancelled(cancelToken);
 
             if (eval.isPassed() || eval.getOverallScore() >= scoreThreshold) {
-                log.debug("会话 {} 质量达标（{}），无需修正",
-                        sessionId, eval.getOverallScore());
                 return response;
             }
 
@@ -496,6 +805,7 @@ public class CodeAgentLoopService {
                         sessionId, reflexionMaxDurationMs);
                 return response;
             }
+            checkCancelled(cancelToken);
 
             if (fixResult.isPassed()
                     && fixResult.getFinalContent() != null
@@ -511,25 +821,23 @@ public class CodeAgentLoopService {
             log.warn("会话 {} 修正未达标或内容为空，保留原答案", sessionId);
             return response;
 
+        } catch (CancellationToken.CancelledException ce) {
+            log.info("会话 {} 反思阶段被取消", sessionId);
+            throw ce;
         } catch (Exception e) {
             log.warn("会话 {} 反思环节异常，保留原答案: {}", sessionId, e.getMessage());
             return response;
-        } finally {
-            log.debug("会话 {} 反思环节耗时 {}ms",
-                    sessionId, System.currentTimeMillis() - reflectStart);
         }
     }
 
     private boolean shouldReflect(String userMessage) {
-        if (userMessage == null || userMessage.isBlank()) {
-            return false;
-        }
+        if (userMessage == null || userMessage.isBlank()) return false;
+        List<String> keywords = domainConfig != null && domainConfig.getReflectKeywords() != null
+                ? domainConfig.getReflectKeywords()
+                : Arrays.asList("实现", "生成", "重构", "方案", "分析", "设计",
+                "优化", "评审", "review", "检查");
         String lower = userMessage.toLowerCase();
-        return lower.contains("实现") || lower.contains("生成")
-                || lower.contains("重构") || lower.contains("方案")
-                || lower.contains("分析") || lower.contains("设计")
-                || lower.contains("优化") || lower.contains("评审")
-                || lower.contains("review") || lower.contains("检查");
+        return keywords.stream().anyMatch(lower::contains);
     }
 
     //endregion
@@ -537,7 +845,6 @@ public class CodeAgentLoopService {
     //region 【I】记忆与系统提示词构建
 
     private ChatMemory memoryOf(String sessionId) {
-        // 直接从 SessionManager 拿会话里绑定的 ChatMemory
         AgentSession session = sessionManager.getOrCreateSession(sessionId);
         return session.getChatMemory();
     }
@@ -562,7 +869,6 @@ public class CodeAgentLoopService {
                     .append(memoryContext);
         }
 
-        //注入工作记忆（让模型知道做到哪了）
         String workingMemoryPrompt = workingMemoryService.renderForPrompt(sessionId);
         if (!workingMemoryPrompt.isEmpty()) {
             sb.append(workingMemoryPrompt);
@@ -578,7 +884,10 @@ public class CodeAgentLoopService {
     @PreDestroy
     public void shutdown() {
         this.shuttingDown = true;
-        log.info("CodeAgentLoopService marked as shutting down");
+        // 关停时把所有活跃请求都标记为取消，释放 OkHttp 连接
+        activeTokens.values().forEach(CancellationToken::cancel);
+        log.info("CodeAgentLoopService marked as shutting down, {} active requests cancelled",
+                activeTokens.size());
     }
 
     @Scheduled(fixedDelay = 300_000, initialDelay = 300_000)
@@ -586,7 +895,6 @@ public class CodeAgentLoopService {
         Set<String> alive = new HashSet<>(sessionManager.getAllSessionIds());
         pendingMemoryContext.keySet().removeIf(id -> !alive.contains(id));
         pendingPlanContext.keySet().removeIf(id -> !alive.contains(id));
-        //清理死会话的工作记忆
         workingMemoryService.getAllSessionIds().stream()
                 .filter(id -> !alive.contains(id))
                 .forEach(workingMemoryService::clear);
@@ -595,9 +903,7 @@ public class CodeAgentLoopService {
         toolCallTrace.evict(alive);
 
         sessionSemaphores.entrySet().removeIf(entry -> {
-            if (alive.contains(entry.getKey())) {
-                return false;
-            }
+            if (alive.contains(entry.getKey())) return false;
             Semaphore sem = entry.getValue();
             if (sem.tryAcquire()) {
                 sem.release();
@@ -605,6 +911,13 @@ public class CodeAgentLoopService {
             }
             return false;
         });
+
+        // 清理已结束的取消令牌
+        activeTokens.entrySet().removeIf(e -> {
+            CancellationToken t = e.getValue();
+            return t == null || t.isCancelled();
+        });
+        requestToSession.entrySet().removeIf(e -> !activeTokens.containsKey(e.getValue()));
     }
 
     //endregion
@@ -612,9 +925,7 @@ public class CodeAgentLoopService {
     //region 【K】辅助与状态管理
 
     private String formatMemoryContext(List<MemoryDocument> memories) {
-        if (memories == null || memories.isEmpty()) {
-            return "";
-        }
+        if (memories == null || memories.isEmpty()) return "";
         return memories.stream()
                 .map(m -> String.format("[%s] %s: %s",
                         m.getTimestamp() != null ? m.getTimestamp().toLocalTime().toString() : "未知",
@@ -627,9 +938,7 @@ public class CodeAgentLoopService {
 
     private String getRecoverySuggestion(Exception e) {
         String message = e.getMessage();
-        if (message == null) {
-            return "请检查系统状态后重试";
-        }
+        if (message == null) return "请检查系统状态后重试";
         if (message.contains("timeout") || message.contains("超时")) {
             return "请求超时，建议简化任务或稍后重试";
         }
@@ -651,9 +960,7 @@ public class CodeAgentLoopService {
         }
     }
 
-    public AgentStatus getStatus() {
-        return AgentStatus.IDLE;
-    }
+    public AgentStatus getStatus() { return AgentStatus.IDLE; }
 
     public void reset() {
         sessionManager.clearAllSessions();
@@ -662,30 +969,80 @@ public class CodeAgentLoopService {
         sessionSemaphores.clear();
         toolCallGuard.clearAll();
         toolCallTrace.clearAll();
-        //清空所有工作记忆
         workingMemoryService.getAllSessionIds()
                 .forEach(workingMemoryService::clear);
+        // 重置时也清掉所有活动令牌
+        activeTokens.values().forEach(CancellationToken::cancel);
+        activeTokens.clear();
+        requestToSession.clear();
         log.info("Agent 已重置");
     }
 
-    public int getActiveSessionCount() {
-        return sessionManager.getActiveSessionCount();
-    }
+    public int getActiveSessionCount() { return sessionManager.getActiveSessionCount(); }
 
-    /**
-     * 把本轮工具调用轨迹同步到工作记忆：每个成功的工具调用尝试标记对应步骤完成。
-     */
     private void syncWorkingMemoryWithTrace(String sessionId) {
         List<ToolCallTrace.Record> records = toolCallTrace.get(sessionId);
-        if (records.isEmpty()) {
-            return;
-        }
+        if (records.isEmpty()) return;
         for (ToolCallTrace.Record r : records) {
             if (r.isSuccess()) {
                 workingMemoryService.markStepCompletedByAction(
                         sessionId, r.getToolName(), r.getResultSummary());
             }
         }
+    }
+
+    //endregion
+
+    //region 【L】请求取消
+
+    private static void checkCancelled(CancellationToken t) {
+        if (t != null) t.throwIfCancelled();
+    }
+
+    /** 把令牌绑定到 session：调用方传了就放入 active 表，没传就不绑定（无法按 sessionId 取消，但不影响正常执行）。 */
+    private CancellationToken bindToken(String sessionId, CancellationToken incoming) {
+        if (incoming == null) {
+            return null;
+        }
+        CancellationToken prev = activeTokens.put(sessionId, incoming);
+        // 如果上一个令牌还在跑，说明前一个请求应该已结束（双层信号量会挡住并发）；
+        // 保险起见，把它标记为取消，防止极端情况下的悬挂。
+        if (prev != null && prev != incoming) {
+            prev.cancel();
+        }
+        return incoming;
+    }
+
+    private void unbindToken(String sessionId, CancellationToken t) {
+        if (t != null) {
+            activeTokens.remove(sessionId, t);
+        }
+    }
+
+    /**
+     * 按 sessionId 取消当前正在执行的请求（同步/流式都行）。
+     * @return true 表示找到并触发了取消；false 表示该 session 当前没有活动请求。
+     */
+    public boolean cancelBySession(String sessionId) {
+        CancellationToken t = activeTokens.get(sessionId);
+        if (t == null) return false;
+        log.info("按 sessionId {} 取消请求", sessionId);
+        t.cancel();
+        return true;
+    }
+
+    /**
+     * 按 requestId 取消（流式请求专用，requestId 由前端在 SSE 连接建立时生成）。
+     */
+    public boolean cancelByRequestId(String requestId) {
+        return CancellationToken.cancel(requestId);
+    }
+
+    /**
+     * 反向查询：给定 requestId 返回其所属 sessionId，无则 null。
+     */
+    public String sessionOfRequest(String requestId) {
+        return requestToSession.get(requestId);
     }
 
     //endregion

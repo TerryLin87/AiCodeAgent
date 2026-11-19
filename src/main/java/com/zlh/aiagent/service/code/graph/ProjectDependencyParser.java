@@ -10,6 +10,7 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * 解析项目的 pom.xml，提取"项目 A 依赖项目 B"。
@@ -32,9 +33,8 @@ public class ProjectDependencyParser {
         }
 
         List<ProjectDependency> result = new ArrayList<>();
-        try {
-            Files.list(root)
-                    .filter(Files::isDirectory)
+        try (Stream<Path> dirs = Files.list(root)) {
+            dirs.filter(Files::isDirectory)
                     .forEach(projectDir -> {
                         String projectName = projectDir.getFileName().toString();
                         Path pom = projectDir.resolve("pom.xml");

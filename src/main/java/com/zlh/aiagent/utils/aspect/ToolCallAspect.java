@@ -11,6 +11,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.concurrent.*;
 
 @Slf4j
@@ -53,8 +54,14 @@ public class ToolCallAspect {
         String sessionId = ToolCallGuard.getCurrentSession();
 
         // 1. 前置：工具调用计数
-        if (sessionId != null && !toolCallGuard.tryAcquire(sessionId, toolName)) {
-            return "[系统提示] 工具调用次数已达上限，请基于已有信息给出最终答案。";
+        if (sessionId != null){
+            if(!toolCallGuard.tryAcquire(sessionId, toolName)) {
+                return "[系统提示] 工具调用次数已达上限，请基于已有信息给出最终答案。";
+            }
+            String sig = toolName + "#" + Arrays.deepHashCode(pjp.getArgs());
+            if (!toolCallGuard.tryAcquireSameSignature(sessionId, sig)) {
+                return "[系统提示] 检测到重复调用同一工具且参数相同，已中断。请基于已有信息给出最终答案。";
+            }
         }
 
         // 2. 超时控制

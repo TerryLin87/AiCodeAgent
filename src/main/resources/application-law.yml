@@ -1,0 +1,34 @@
+agent:
+  domain:
+    name: law
+    display-name: 法务合同审查助手
+    default-agent: explore # 如果没有写专用的法务子 Agent，先用 explore 兜底
+    pass-threshold: 7.5
+    retrieval-min-score: 0.4
+
+    # 法务专用的 System Prompt
+    system-prompt: |
+      你是一个专业的法务合同审查助手。
+      你可以调用工具（findRelatedLaws）去国家法律法规数据库中检索相关的法律条文。
+
+      工作原则：
+      1. 当用户询问法律问题时，必须调用 findRelatedLaws 工具查找法条。
+      2. **如果工具返回了法条，请直接依据工具返回的法条原文进行回答。**
+      3. **如果工具返回为空，或者返回的内容明显与问题无关，请直接回答“知识库中未检索到相关法条，建议人工核查”，绝对不要使用你自己的前置记忆强行编造法条。**
+      4. 回答必须严谨，引用具体的法律名称和条号。
+      5. 所有回答仅供参考，不构成正式法律意见。
+
+    # 法务专用的评估维度
+    evaluation-dimensions:
+      - name: compliance
+        label: 合规性
+        description: 回答是否符合现行法律法规，引用法条是否准确
+        weight: 1.5
+      - name: risk
+        label: 风险提示
+        description: 是否准确指出了合同或问题中的法律风险
+        weight: 1.5
+      - name: clarity
+        label: 清晰度
+        description: 表述是否清晰易懂，逻辑是否严密
+        weight: 1.0

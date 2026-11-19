@@ -208,9 +208,11 @@ public class WorkingMemoryService {
             sb.append("步骤:\n");
             for (WorkingMemory.StepRecord step : memory.getSteps()) {
                 String mark = switch (step.getStatus()) {
-                    case 2 -> "✅";   // COMPLETED（对应 PlanStatus.COMPLETED.getCode()，按你枚举实际值调整）
-                    case 3 -> "❌";   // FAILED
-                    default -> "⏳";  // PENDING / RUNNING
+                    case 2 -> "✅";   // COMPLETED
+                    case 4 -> "❌";   // FAILED
+                    case 3 -> "🔄";   // REPLANNING
+                    case 1 -> "🔵";   // RUNNING
+                    default -> "⏳";  // PENDING(0)
                 };
                 sb.append("  ").append(mark).append(" ").append(step.getOrder())
                         .append(". ").append(step.getDescription() != null ? step.getDescription() : "").append("\n");

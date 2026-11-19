@@ -55,7 +55,7 @@ public class SubAgentRoutingService {
     @Qualifier("DeepSeekModel")
     private DeepSeekModel chatModel;
 
-    @Autowired
+    @Autowired(required = false)
     private List<ISubAgent> allAgents;
 
     @Autowired
@@ -81,6 +81,10 @@ public class SubAgentRoutingService {
     /** 应用启动时构建 Agent 索引与关键词表，并缓存路由 Prompt。 */
     @PostConstruct
     public void init() {
+        if (allAgents == null) {
+            allAgents = java.util.Collections.emptyList();
+        }
+
         agentIndex = allAgents.stream()
                 .collect(Collectors.toMap(ISubAgent::getName, a -> a, (a, b) -> a, LinkedHashMap::new));
 
@@ -296,10 +300,13 @@ public class SubAgentRoutingService {
     public boolean isComplexTask(String task) {
         if (task == null) return false;
         if (task.length() > 60) return true;
+        List<String> keywords = domainConfig != null && domainConfig.getComplexKeywords() != null
+                ? domainConfig.getComplexKeywords()
+                : Arrays.asList("分析", "重构", "方案", "实现", "修改", "影响", "怎么", "如何",
+                "完整", "对比", "优化", "调试", "排查", "设计", "为什么", "原因");
         String lower = task.toLowerCase(Locale.ROOT);
         int hit = 0;
-        for (String w : Arrays.asList("分析", "重构", "方案", "实现", "修改", "影响", "怎么", "如何",
-                "完整", "对比", "优化", "调试", "排查", "设计", "为什么", "原因")) {
+        for (String w : keywords) {
             if (lower.contains(w)) hit++;
         }
         return hit >= 2;

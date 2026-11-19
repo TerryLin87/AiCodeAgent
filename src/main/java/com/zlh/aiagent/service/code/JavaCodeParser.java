@@ -29,9 +29,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Java 源码解析器：基于 JavaParser 把 .java 文件解析成代码片段（类/方法）并抽取调用关系
@@ -94,11 +98,10 @@ public class JavaCodeParser implements IDocumentParser {
     private void buildPackageProjectMapping() {
         String subProjectsPath = indexConfig.getSubProjectsPath();
         if (subProjectsPath != null && !subProjectsPath.isEmpty()) {
-            java.nio.file.Path dir = java.nio.file.Paths.get(subProjectsPath);
-            if (java.nio.file.Files.exists(dir)) {
-                try {
-                    java.nio.file.Files.list(dir)
-                            .filter(java.nio.file.Files::isDirectory)
+            Path dir = Paths.get(subProjectsPath);
+            if (Files.exists(dir)) {
+                try (Stream<Path> dirs = Files.list(dir)) {
+                    dirs.filter(java.nio.file.Files::isDirectory)
                             .forEach(p -> {
                                 String projectName = p.getFileName().toString();
                                 registerProjectPrefix(projectName, projectName);
